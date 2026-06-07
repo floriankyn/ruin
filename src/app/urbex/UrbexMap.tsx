@@ -23,6 +23,10 @@ type BaseLayer =
   | "satellite" | "esri-topo" | "esri-street" | "esri-natgeo"
   | "esri-ocean" | "esri-relief" | "esri-physical"
   | "esri-light-gray" | "esri-dark-gray"
+  // Historical
+  | "ign-cassini" | "ign-etatmajor"
+  | "nls-os6inch" | "nls-os1inch"
+  | "openhistoricalmap" | "usgs-topo"
 
 interface Checkpoint {
   id: string
@@ -61,6 +65,40 @@ interface WaybackVersion {
   label: string
 }
 
+interface CadastreParcel {
+  idu: string
+  numero: string
+  section: string
+  nom_com: string
+  code_dep: string
+  code_insee: string
+  contenance: number
+  lngLat: { lng: number; lat: number }
+}
+
+interface CadastreCard {
+  pos: { x: number; y: number }
+  loading: boolean
+  data: CadastreParcel | null
+  error: boolean
+}
+
+interface DvfMutation {
+  id_mutation: string
+  date_mutation: string
+  nature_mutation: string
+  valeur_fonciere: string | null
+  l_acheteur_denomination_usuelle: string[]
+  l_acheteur_personne_physique: boolean[]
+}
+
+interface OwnerPipeline {
+  parcel: CadastreParcel
+  loading: boolean
+  mutations: DvfMutation[]
+  dvfError: boolean
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const WAYBACK_CONFIG_URL =
@@ -77,6 +115,59 @@ function formatWaybackDate(iso: string) {
     })
   } catch { return iso }
 }
+
+function formatArea(m2: number): string {
+  const m2s = m2.toLocaleString("fr-FR") + " m²"
+  if (m2 >= 10000) return `${(m2 / 10000).toFixed(3)} ha · ${m2s}`
+  if (m2 >= 100) return `${(m2 / 100).toFixed(1)} a · ${m2s}`
+  return m2s
+}
+
+// Esri Wayback availability: MapServer/1 is the "local changes" feature layer.
+// Querying it with the current viewport returns roll_date values for versions
+// that actually have updated imagery in that area.
+const WAYBACK_AVAIL_URL =
+  "https://wayback.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/1/query"
+
+function lngLatToWebMercator(lng: number, lat: number) {
+  return {
+    x: lng * (Math.PI / 180) * 6378137,
+    y: Math.log(Math.tan((90 + lat) * Math.PI / 360)) * 6378137,
+  }
+}
+
+async function queryWaybackAvailability(
+  west: number, south: number, east: number, north: number,
+  allVersions: WaybackVersion[]
+): Promise<WaybackVersion[]> {
+  const sw = lngLatToWebMercator(west, south)
+  const ne = lngLatToWebMercator(east, north)
+  const envelope = { xmin: sw.x, ymin: sw.y, xmax: ne.x, ymax: ne.y, spatialReference: { wkid: 102100 } }
+  const qs = new URLSearchParams({
+    f: "json",
+    geometry: JSON.stringify(envelope),
+    geometryType: "esriGeometryEnvelope",
+    spatialRel: "esriSpatialRelIntersects",
+    outFields: "roll_date",
+    returnGeometry: "false",
+    where: "1=1",
+    resultRecordCount: "1000",
+  })
+  const res = await fetch(`${WAYBACK_AVAIL_URL}?${qs}`)
+  if (!res.ok) return allVersions
+  const data = await res.json()
+  const features: { attributes: { roll_date?: string } }[] = data.features ?? []
+  if (features.length === 0) return allVersions
+  const availDates = new Set(features.map(f => f.attributes.roll_date ?? "").filter(Boolean))
+  const filtered = allVersions.filter(v => availDates.has(v.date))
+  return filtered.length > 0 ? filtered : allVersions
+}
+
+// IGN Géoplateforme WMTS helper — CORS open, free, France coverage only
+const IGN_WMTS = (layer: string, fmt = "image%2Fpng", tms = "PM") =>
+  `https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=${layer}&STYLE=normal&TILEMATRIXSET=${tms}&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&FORMAT=${fmt}`
+
+const NLS_S3 = "https://mapseries-tilesets.s3.amazonaws.com"
 
 const ESRI = "https://server.arcgisonline.com/ArcGIS/rest/services"
 const ESRI_SATELLITE_TILES = [`${ESRI}/World_Imagery/MapServer/tile/{z}/{y}/{x}`]
@@ -114,6 +205,17 @@ const STYLES: Record<BaseLayer, StyleSpecification> = {
   "esri-physical":  rasterStyle([`${ESRI}/World_Physical_Map/MapServer/tile/{z}/{y}/{x}`],                   ESRI_ATTR, "#a8c8e8"),
   "esri-light-gray":rasterStyle([`${ESRI}/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}`],         ESRI_ATTR, "#f5f5f0"),
   "esri-dark-gray": rasterStyle([`${ESRI}/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}`],          ESRI_ATTR, "#2a2a2a"),
+  // Historical — IGN France (data.geopf.fr, CORS open, free)
+  // Layer IDs and TileMatrixSets from GetCapabilities; format must match each layer's offering
+  "ign-cassini":   rasterStyle([IGN_WMTS("BNF-IGNF_GEOGRAPHICALGRIDSYSTEMS.CASSINI",  "image%2Fpng",  "PM_6_14")], "© IGN Géoplateforme", "#f5f0e4"),
+  "ign-etatmajor": rasterStyle([IGN_WMTS("GEOGRAPHICALGRIDSYSTEMS.ETATMAJOR40",        "image%2Fjpeg", "PM_6_15")], "© IGN Géoplateforme", "#ede8d8"),
+  // Historical — NLS (National Library of Scotland) public S3 tile sets — CORS enabled on GET
+  "nls-os6inch":   rasterStyle([`${NLS_S3}/os/6inchsecond/{z}/{x}/{y}.png`],  "© National Library of Scotland", "#e8e0cc"),
+  "nls-os1inch":   rasterStyle([`${NLS_S3}/1inch_2nd_ed/{z}/{x}/{y}.png`],    "© National Library of Scotland", "#e4dcc8"),
+  // Historical — Bartholomew World Atlas c.1880–1920, NLS S3 (replaces OHM tile servers, which are down)
+  "openhistoricalmap": rasterStyle([`${NLS_S3}/bartholomew-world/{z}/{x}/{y}.png`], "© National Library of Scotland / Bartholomew", "#f0ead8"),
+  // USGS National Map Topo (US coverage, topographic style)
+  "usgs-topo":      rasterStyle(["https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}"], "© USGS National Map", "#e4f0e4"),
 }
 
 // MapLibre GL v5: legacy filter arrays reject ["get","prop"] sub-arrays — use bare strings.
@@ -153,6 +255,15 @@ const ESRI_LAYERS: { key: BaseLayer; label: string }[] = [
   { key: "esri-physical",     label: "Physical" },
   { key: "esri-light-gray",   label: "Light Gray" },
   { key: "esri-dark-gray",    label: "Dark Gray" },
+]
+
+const HISTORICAL_LAYERS: { key: BaseLayer; label: string; note: string }[] = [
+  { key: "ign-cassini",       label: "Cassini",          note: "FR · 18th c." },
+  { key: "ign-etatmajor",     label: "État-Major",       note: "FR · 1820–1866" },
+  { key: "nls-os6inch",       label: "OS 6-inch",        note: "UK · 2nd ed." },
+  { key: "nls-os1inch",       label: "OS 1-inch",        note: "UK · 1840s–1900s" },
+  { key: "openhistoricalmap", label: "Bartholomew",      note: "Global · c.1880–1920" },
+  { key: "usgs-topo",         label: "USGS Topo",        note: "US · national map" },
 ]
 
 const DORKS: { label: string; template: (loc: string) => string }[] = [
@@ -346,6 +457,10 @@ export default function UrbexMap() {
   const buildingsRef = useRef(false)
   const labelsRef = useRef(false)
   const streetViewModeRef = useRef(false)
+  const globeModeRef = useRef(false)
+  const filteredVersionsRef = useRef<WaybackVersion[]>([])
+  const selectedVersionIdRef = useRef<string | null>(null)
+  const availCheckTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const [coords, setCoords] = useState({ lng: 2.3522, lat: 48.8566 })
@@ -364,6 +479,8 @@ export default function UrbexMap() {
   const [waybackVersions, setWaybackVersions] = useState<WaybackVersion[]>([])
   const [waybackIdx, setWaybackIdx] = useState<number | null>(null)
   const [waybackLoading, setWaybackLoading] = useState(false)
+  const [filteredVersions, setFilteredVersions] = useState<WaybackVersion[]>([])
+  const [waybackAvailLoading, setWaybackAvailLoading] = useState(false)
   // Overlays
   const [terrainOverlay, setTerrainOverlay] = useState(false)
   const [streetViewOverlay, setStreetViewOverlay] = useState(false)
@@ -372,6 +489,9 @@ export default function UrbexMap() {
   const [labelsOverlay, setLabelsOverlay] = useState(false)
   const [overlaysOpen, setOverlaysOpen] = useState(false)
   const [streetViewMode, setStreetViewMode] = useState(false)
+  const [globeMode, setGlobeMode] = useState(false)
+  const [cadastreCard, setCadastreCard] = useState<CadastreCard | null>(null)
+  const [ownerPipeline, setOwnerPipeline] = useState<OwnerPipeline | null>(null)
   // Search
   const [searchQuery, setSearchQuery] = useState("")
   const [searchResults, setSearchResults] = useState<NominatimResult[]>([])
@@ -381,6 +501,24 @@ export default function UrbexMap() {
 
   const showToast = useCallback((msg: string) => {
     setToast(msg); setTimeout(() => setToast(null), 3000)
+  }, [])
+
+  const checkWaybackAvailability = useCallback(async () => {
+    const map = mapRef.current
+    const versions = waybackVersionsRef.current
+    if (!map || versions.length === 0) return
+    setWaybackAvailLoading(true)
+    try {
+      const b = map.getBounds()
+      const filtered = await queryWaybackAvailability(
+        b.getWest(), b.getSouth(), b.getEast(), b.getNorth(), versions
+      )
+      setFilteredVersions(filtered)
+    } catch {
+      setFilteredVersions(waybackVersionsRef.current)
+    } finally {
+      setWaybackAvailLoading(false)
+    }
   }, [])
 
   // ── Map init ──────────────────────────────────────────────────────────────
@@ -410,6 +548,37 @@ export default function UrbexMap() {
         return
       }
       setContextMenu(null)
+      if (cadastreRef.current) {
+        const { x, y } = e.point
+        const { lng, lat } = e.lngLat
+        setCadastreCard({ pos: { x, y }, loading: true, data: null, error: false })
+        fetch(`https://apicarto.ign.fr/api/cadastre/parcelle?lon=${lng.toFixed(6)}&lat=${lat.toFixed(6)}`)
+          .then((r) => { if (!r.ok) throw new Error("http"); return r.json() })
+          .then((data) => {
+            const props = data.features?.[0]?.properties
+            if (!props) { setCadastreCard((prev) => prev ? { ...prev, loading: false, error: true } : null); return }
+            setCadastreCard((prev) => prev ? {
+              ...prev, loading: false,
+              data: {
+                idu: props.idu ?? "",
+                numero: props.numero ?? "",
+                section: props.section ?? "",
+                nom_com: props.nom_com ?? "",
+                code_dep: props.code_dep ?? "",
+                code_insee: props.code_insee ?? "",
+                contenance: props.contenance ?? 0,
+                lngLat: { lng, lat },
+              },
+            } : null)
+          })
+          .catch(() => { setCadastreCard((prev) => prev ? { ...prev, loading: false, error: true } : null) })
+        return
+      }
+    })
+    map.on("moveend", () => {
+      if (baseLayerRef.current !== "satellite") return
+      if (availCheckTimeoutRef.current) clearTimeout(availCheckTimeoutRef.current)
+      availCheckTimeoutRef.current = setTimeout(() => { checkWaybackAvailability() }, 500)
     })
     map.once("load", () => {
       if (!mapRef.current) return
@@ -463,13 +632,21 @@ export default function UrbexMap() {
       // Restore Wayback tile if returning to satellite with a version selected
       if (baseLayer === "satellite") {
         const idx = waybackIdxRef.current
-        const versions = waybackVersionsRef.current
-        if (idx !== null && versions[idx]) {
+        const activeVersions = filteredVersionsRef.current.length > 0
+          ? filteredVersionsRef.current
+          : waybackVersionsRef.current
+        if (idx !== null && activeVersions[idx]) {
           const src = map.getSource("tiles") as maplibregl.RasterTileSource | undefined
-          src?.setTiles([waybackTileUrl(versions[idx].id)])
+          src?.setTiles([waybackTileUrl(activeVersions[idx].id)])
         }
+        // Re-check availability for the current view when returning to satellite
+        if (waybackVersionsRef.current.length > 0) checkWaybackAvailability()
       }
       applyActiveOverlays(map, terrainRef.current, streetViewRef.current, cadastreRef.current, buildingsRef.current, labelsRef.current)
+      if (globeModeRef.current) {
+        map.setProjection({ type: "globe" })
+        map.setSky({ "sky-color": "#0d1f4a", "horizon-color": "#b0d0f0", "atmosphere-blend": 0.85 })
+      }
       const newDraw = new MapboxDraw({ displayControlsDefault: false, controls: {}, defaultMode: "simple_select", styles: DRAW_STYLES })
       map.addControl(newDraw as unknown as maplibregl.IControl)
       drawRef.current = newDraw
@@ -490,6 +667,7 @@ export default function UrbexMap() {
         versions.sort((a, b) => a.date.localeCompare(b.date)) // oldest first → slider left=old right=new
         waybackVersionsRef.current = versions
         setWaybackVersions(versions)
+        checkWaybackAvailability()
       })
       .catch(() => { /* silently fall back to Latest */ })
       .finally(() => setWaybackLoading(false))
@@ -503,8 +681,20 @@ export default function UrbexMap() {
     if (!map || !map.isStyleLoaded()) return
     const src = map.getSource("tiles") as maplibregl.RasterTileSource | undefined
     if (!src) return
-    src.setTiles(waybackIdx === null ? ESRI_SATELLITE_TILES : [waybackTileUrl(waybackVersions[waybackIdx]?.id ?? "")])
-  }, [waybackIdx, baseLayer, waybackVersions])
+    const activeVersions = filteredVersions.length > 0 ? filteredVersions : waybackVersions
+    src.setTiles(waybackIdx === null ? ESRI_SATELLITE_TILES : [waybackTileUrl(activeVersions[waybackIdx]?.id ?? "")])
+  }, [waybackIdx, baseLayer, waybackVersions, filteredVersions])
+
+  // ── Sync filteredVersionsRef; recover selected version after filter change ──
+  useEffect(() => {
+    filteredVersionsRef.current = filteredVersions
+    const currentId = selectedVersionIdRef.current
+    if (currentId === null) return // on Latest, nothing to do
+    const newList = filteredVersions.length > 0 ? filteredVersions : waybackVersionsRef.current
+    const newIdx = newList.findIndex(v => v.id === currentId)
+    setWaybackIdx(newIdx >= 0 ? newIdx : null)
+    if (newIdx < 0) selectedVersionIdRef.current = null
+  }, [filteredVersions])
 
   // ── Overlay effects ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -542,6 +732,22 @@ export default function UrbexMap() {
     const canvas = mapRef.current?.getCanvas()
     if (canvas) canvas.style.cursor = streetViewMode ? "crosshair" : ""
   }, [streetViewMode])
+
+  useEffect(() => {
+    globeModeRef.current = globeMode
+    const map = mapRef.current; if (!map || !map.isStyleLoaded()) return
+    if (globeMode) {
+      map.setProjection({ type: "globe" })
+      map.setSky({ "sky-color": "#0d1f4a", "horizon-color": "#b0d0f0", "atmosphere-blend": 0.85 })
+    } else {
+      map.setProjection({ type: "mercator" })
+      map.setSky({})
+    }
+  }, [globeMode])
+
+  useEffect(() => {
+    if (!cadastreOverlay) setCadastreCard(null)
+  }, [cadastreOverlay])
 
   // ── Checkpoint ────────────────────────────────────────────────────────────
   const addCheckpoint = useCallback((lngLat: { lng: number; lat: number }, status: StatusKey) => {
@@ -583,10 +789,41 @@ export default function UrbexMap() {
     ? `${computeCentroid(selectedPolygon.geometry)[1].toFixed(4)},${computeCentroid(selectedPolygon.geometry)[0].toFixed(4)}`
     : ""
 
-  const maxIdx = waybackVersions.length - 1
+  const displayedVersions = filteredVersions.length > 0 ? filteredVersions : waybackVersions
+  const maxIdx = displayedVersions.length - 1
   const sliderVal = waybackIdx ?? maxIdx
-  const stepOlder = () => setWaybackIdx((i) => i === null ? maxIdx : Math.max(0, i - 1))
-  const stepNewer = () => setWaybackIdx((i) => (i === null || i >= maxIdx) ? null : i + 1)
+
+  const selectVersion = (idx: number | null) => {
+    selectedVersionIdRef.current = idx === null ? null : (displayedVersions[idx]?.id ?? null)
+    setWaybackIdx(idx)
+  }
+  const stepOlder = () => {
+    const i = waybackIdxRef.current
+    selectVersion(i === null ? maxIdx : Math.max(0, i - 1))
+  }
+  const stepNewer = () => {
+    const i = waybackIdxRef.current
+    selectVersion(i === null || i >= maxIdx ? null : i + 1)
+  }
+
+  const launchOwnerPipeline = useCallback((parcel: CadastreParcel) => {
+    setOwnerPipeline({ parcel, loading: true, mutations: [], dvfError: false })
+    const url =
+      `https://apidf.cerema.fr/dvf_opendata/mutations/` +
+      `?section=${encodeURIComponent(parcel.section)}` +
+      `&numero_plan=${encodeURIComponent(parcel.numero)}` +
+      `&code_commune=${parcel.code_insee}` +
+      `&ordering=-date_mutation&limit=10`
+    fetch(url)
+      .then((r) => { if (!r.ok) throw new Error("http"); return r.json() })
+      .then((data) => {
+        const mutations: DvfMutation[] = Array.isArray(data.results) ? data.results : []
+        setOwnerPipeline((prev) => prev ? { ...prev, loading: false, mutations } : null)
+      })
+      .catch(() => {
+        setOwnerPipeline((prev) => prev ? { ...prev, loading: false, dvfError: true } : null)
+      })
+  }, [])
 
   const anyOverlayActive = terrainOverlay || streetViewOverlay || cadastreOverlay || buildingsOverlay || labelsOverlay
 
@@ -636,6 +873,17 @@ export default function UrbexMap() {
         >
           <StreetViewIcon /> Street View{streetViewMode && <span className="text-xs opacity-75">· click map</span>}
         </button>
+        <button
+          onClick={() => setGlobeMode((v) => !v)}
+          title={globeMode ? "Switch to flat map" : "Switch to 3D globe projection"}
+          className={`flex items-center gap-2 w-fit text-sm px-3 py-2 rounded-lg border transition-colors shadow-lg ${
+            globeMode
+              ? "bg-indigo-500 text-white border-indigo-400 hover:bg-indigo-600"
+              : "bg-zinc-900/90 backdrop-blur-sm text-zinc-200 border-zinc-700/60 hover:bg-zinc-800 hover:text-white"
+          }`}
+        >
+          <GlobeIcon /> {globeMode ? "Flat Map" : "3D Globe"}
+        </button>
       </div>
 
       {/* ── Layer switcher + Overlays — top right ───────────────────────────── */}
@@ -651,10 +899,27 @@ export default function UrbexMap() {
           </div>
           <div className="border-t border-zinc-800" />
           {/* Esri group */}
-          <div className="px-2 pt-2 pb-2 max-h-56 overflow-y-auto">
+          <div className="px-2 pt-2 pb-2 max-h-44 overflow-y-auto">
             <div className="text-[9px] uppercase tracking-widest font-semibold text-zinc-600 px-1.5 mb-1">Esri</div>
             {ESRI_LAYERS.map(({ key, label }) => (
               <LayerButton key={key} active={baseLayer === key} onClick={() => setBaseLayer(key)}>{label}</LayerButton>
+            ))}
+          </div>
+          <div className="border-t border-zinc-800" />
+          {/* Historical group */}
+          <div className="px-2 pt-2 pb-2 max-h-52 overflow-y-auto">
+            <div className="text-[9px] uppercase tracking-widest font-semibold text-zinc-600 px-1.5 mb-1">Historical</div>
+            {HISTORICAL_LAYERS.map(({ key, label, note }) => (
+              <button
+                key={key}
+                onClick={() => setBaseLayer(key)}
+                className={`w-full text-left px-2 py-1.5 rounded-lg transition-colors ${
+                  baseLayer === key ? "bg-amber-900/60 text-amber-200 font-semibold" : "text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
+                }`}
+              >
+                <div className="text-xs leading-tight">{label}</div>
+                <div className="text-[9px] text-zinc-600 leading-tight mt-0.5">{note}</div>
+              </button>
             ))}
           </div>
         </div>
@@ -700,31 +965,37 @@ export default function UrbexMap() {
       {baseLayer === "satellite" && (
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 bg-zinc-900/90 backdrop-blur-sm border border-zinc-700/60 rounded-xl px-4 py-3 shadow-lg select-none" style={{ minWidth: 340 }}>
           <div className="flex items-center justify-between mb-2.5">
-            <span className="text-[10px] uppercase tracking-wider font-medium text-zinc-500">Esri Imagery Timeline</span>
-            <button onClick={() => setWaybackIdx(null)} className={`text-xs px-2 py-0.5 rounded-md transition-colors font-medium ${waybackIdx === null ? "bg-zinc-100 text-zinc-900" : "text-zinc-400 hover:text-zinc-200"}`}>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] uppercase tracking-wider font-medium text-zinc-500">Esri Imagery Timeline</span>
+              {waybackAvailLoading && <span className="text-[10px] text-zinc-600 animate-pulse">·· scanning</span>}
+              {!waybackAvailLoading && filteredVersions.length > 0 && filteredVersions.length < waybackVersions.length && (
+                <span className="text-[10px] text-blue-500 font-medium">{filteredVersions.length} dates</span>
+              )}
+            </div>
+            <button onClick={() => { selectedVersionIdRef.current = null; setWaybackIdx(null) }} className={`text-xs px-2 py-0.5 rounded-md transition-colors font-medium ${waybackIdx === null ? "bg-zinc-100 text-zinc-900" : "text-zinc-400 hover:text-zinc-200"}`}>
               Latest
             </button>
           </div>
           {waybackLoading ? (
             <div className="text-[11px] text-zinc-500 text-center py-1">Loading versions…</div>
-          ) : waybackVersions.length > 0 ? (
+          ) : displayedVersions.length > 0 ? (
             <>
               <div className="flex items-center gap-2">
                 <button onClick={stepOlder} disabled={waybackIdx === 0} className="w-6 h-6 flex items-center justify-center rounded-md bg-zinc-800 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed text-zinc-300 transition-colors flex-shrink-0 text-sm" title="Older">‹</button>
                 <input
                   type="range" min={0} max={maxIdx} value={sliderVal}
-                  onChange={(e) => { const v = Number(e.target.value); setWaybackIdx(v >= maxIdx ? null : v) }}
+                  onChange={(e) => { const v = Number(e.target.value); selectVersion(v >= maxIdx ? null : v) }}
                   className="flex-1 h-1.5 appearance-none bg-zinc-700 rounded-full outline-none cursor-pointer"
                   style={{ accentColor: "#3b82f6" }}
                 />
                 <button onClick={stepNewer} disabled={waybackIdx === null} className="w-6 h-6 flex items-center justify-center rounded-md bg-zinc-800 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed text-zinc-300 transition-colors flex-shrink-0 text-sm" title="Newer">›</button>
               </div>
               <div className="flex items-center justify-between mt-2">
-                <span className="text-[10px] text-zinc-600">{waybackVersions[0]?.label}</span>
+                <span className="text-[10px] text-zinc-600">{displayedVersions[0]?.label}</span>
                 <span className={`text-xs font-semibold tabular-nums ${waybackIdx === null ? "text-zinc-400" : "text-blue-400"}`}>
-                  {waybackIdx === null ? "Current · Live Esri" : `${waybackVersions[waybackIdx]?.label ?? ""} · Esri Wayback`}
+                  {waybackIdx === null ? "Current · Live Esri" : `${displayedVersions[waybackIdx]?.label ?? ""} · Esri Wayback`}
                 </span>
-                <span className="text-[10px] text-zinc-600">{waybackVersions[maxIdx]?.label}</span>
+                <span className="text-[10px] text-zinc-600">{displayedVersions[maxIdx]?.label}</span>
               </div>
             </>
           ) : (
@@ -745,6 +1016,180 @@ export default function UrbexMap() {
               {s.label}
             </button>
           ))}
+        </div>
+      )}
+
+      {/* ── Cadastre parcel card ─────────────────────────────────────────────── */}
+      {cadastreCard && (
+        <div
+          className="absolute z-30 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-64 overflow-hidden pointer-events-auto"
+          style={{
+            left: clamp(cadastreCard.pos.x + 14, 8, window.innerWidth - 272),
+            top: clamp(cadastreCard.pos.y - 28, 8, window.innerHeight - 340),
+          }}
+        >
+          <div className="flex items-center justify-between px-3 py-2.5 border-b border-zinc-800">
+            <span className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">Parcelle cadastrale</span>
+            <button onClick={() => setCadastreCard(null)} className="text-zinc-500 hover:text-zinc-300 leading-none w-5 h-5 flex items-center justify-center text-xl">×</button>
+          </div>
+          {cadastreCard.loading ? (
+            <div className="px-3 py-5 text-xs text-zinc-500 text-center">Chargement…</div>
+          ) : cadastreCard.error || !cadastreCard.data ? (
+            <div className="px-3 py-5 text-xs text-zinc-500 text-center">Aucune parcelle à cet endroit</div>
+          ) : (
+            <div className="p-3 space-y-2.5">
+              <div>
+                <div className="text-[9px] uppercase tracking-wider text-zinc-600 mb-0.5">Identifiant (IDU)</div>
+                <div className="text-xs font-mono text-zinc-300 leading-tight">{cadastreCard.data.idu}</div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <div className="text-[9px] uppercase tracking-wider text-zinc-600 mb-0.5">Section</div>
+                  <div className="text-xs text-zinc-300">{cadastreCard.data.section}</div>
+                </div>
+                <div>
+                  <div className="text-[9px] uppercase tracking-wider text-zinc-600 mb-0.5">Numéro</div>
+                  <div className="text-xs text-zinc-300">{cadastreCard.data.numero}</div>
+                </div>
+              </div>
+              <div>
+                <div className="text-[9px] uppercase tracking-wider text-zinc-600 mb-0.5">Commune</div>
+                <div className="text-xs text-zinc-300">{cadastreCard.data.nom_com} <span className="text-zinc-600">({cadastreCard.data.code_insee})</span></div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <div className="text-[9px] uppercase tracking-wider text-zinc-600 mb-0.5">Département</div>
+                  <div className="text-xs text-zinc-300">{cadastreCard.data.code_dep}</div>
+                </div>
+                <div>
+                  <div className="text-[9px] uppercase tracking-wider text-zinc-600 mb-0.5">Surface</div>
+                  <div className="text-xs text-zinc-300 leading-tight">{formatArea(cadastreCard.data.contenance)}</div>
+                </div>
+              </div>
+              <div className="flex gap-1.5 pt-2 border-t border-zinc-800">
+                <a
+                  href={`https://www.geoportail.gouv.fr/carte?c=${cadastreCard.data.lngLat.lng},${cadastreCard.data.lngLat.lat}&z=18&l0=GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2::GEOPORTAIL:OGC:WMTS(1)&l1=CADASTRALPARCELS.PARCELLAIRE_EXPRESS::GEOPORTAIL:OGC:WMTS(0.7)&permalink=yes`}
+                  target="_blank" rel="noopener noreferrer"
+                  className="flex-1 text-center text-[11px] text-blue-400 hover:text-blue-300 transition-colors py-0.5"
+                >
+                  Géoportail →
+                </a>
+                <div className="w-px bg-zinc-800" />
+                <button
+                  onClick={() => launchOwnerPipeline(cadastreCard.data!)}
+                  className="flex-1 text-center text-[11px] text-amber-400 hover:text-amber-300 transition-colors py-0.5 font-medium"
+                >
+                  Propriétaire →
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Owner Pipeline panel ─────────────────────────────────────────────── */}
+      {ownerPipeline && (
+        <div className="absolute top-4 right-4 z-30 w-80 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl overflow-hidden">
+          <div className="flex items-center gap-2 px-4 py-3 border-b border-zinc-800">
+            <span className="text-sm font-semibold text-zinc-100 flex-1 truncate">Recherche propriétaire</span>
+            <button onClick={() => setOwnerPipeline(null)} className="text-zinc-500 hover:text-zinc-300 leading-none w-5 h-5 flex items-center justify-center text-xl flex-shrink-0">×</button>
+          </div>
+
+          <div className="p-3 border-b border-zinc-800/60 bg-zinc-900/60">
+            <div className="text-[9px] uppercase tracking-wider text-zinc-600 mb-1">Parcelle</div>
+            <div className="text-xs font-mono text-zinc-400">{ownerPipeline.parcel.idu}</div>
+            <div className="text-xs text-zinc-500 mt-0.5">
+              Section {ownerPipeline.parcel.section} n°{ownerPipeline.parcel.numero} — {ownerPipeline.parcel.nom_com}
+            </div>
+          </div>
+
+          <div className="p-3 border-b border-zinc-800/60 overflow-y-auto max-h-56">
+            <div className="text-[9px] uppercase tracking-wider text-zinc-600 mb-2">Historique DVF (transactions)</div>
+            {ownerPipeline.loading ? (
+              <div className="text-xs text-zinc-500 py-2 text-center">Interrogation DVF CEREMA…</div>
+            ) : ownerPipeline.dvfError ? (
+              <div className="text-xs text-zinc-600 py-2 text-center">
+                DVF indisponible (CORS ou hors couverture).<br />
+                <span className="text-zinc-700">Utilisez les liens ci-dessous.</span>
+              </div>
+            ) : ownerPipeline.mutations.length === 0 ? (
+              <div className="text-xs text-zinc-600 py-2 text-center">Aucune transaction trouvée pour cette parcelle.</div>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {ownerPipeline.mutations.map((m) => {
+                  const buyers = m.l_acheteur_denomination_usuelle?.filter(Boolean) ?? []
+                  const hasCompany = buyers.length > 0
+                  const isPhysical = m.l_acheteur_personne_physique?.[0] === true
+                  return (
+                    <div key={m.id_mutation} className="rounded-lg bg-zinc-800/60 border border-zinc-700/40 px-3 py-2 space-y-0.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[10px] text-zinc-400">{new Date(m.date_mutation).toLocaleDateString("fr-FR", { day: "numeric", month: "short", year: "numeric" })}</span>
+                        <span className="text-[10px] text-zinc-500 bg-zinc-700/60 px-1.5 py-0.5 rounded">{m.nature_mutation}</span>
+                      </div>
+                      {m.valeur_fonciere && (
+                        <div className="text-xs text-zinc-300 font-medium">
+                          {Number(m.valeur_fonciere).toLocaleString("fr-FR")} €
+                        </div>
+                      )}
+                      {hasCompany ? (
+                        <div className="text-xs text-amber-300/80">{buyers.join(", ")}</div>
+                      ) : isPhysical ? (
+                        <div className="text-[10px] text-zinc-600 italic">Personne physique (anonymisé)</div>
+                      ) : null}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+
+          <div className="p-3 overflow-y-auto max-h-64">
+            <div className="text-[9px] uppercase tracking-wider text-zinc-600 mb-2">Liens de recherche</div>
+            <div className="flex flex-col gap-1">
+              {[
+                {
+                  label: "DVF Explorer · Etalab",
+                  desc: "Carte des transactions immobilières",
+                  url: `https://dvf.etalab.gouv.fr/?lon=${ownerPipeline.parcel.lngLat.lng.toFixed(5)}&lat=${ownerPipeline.parcel.lngLat.lat.toFixed(5)}&zoom=15`,
+                },
+                {
+                  label: "Google · IDU",
+                  desc: `Recherche "${ownerPipeline.parcel.idu}"`,
+                  url: `https://www.google.com/search?q="${ownerPipeline.parcel.idu}"`,
+                },
+                {
+                  label: "Pappers · Commune",
+                  desc: `Sociétés à ${ownerPipeline.parcel.nom_com}`,
+                  url: `https://www.pappers.fr/recherche?q=${encodeURIComponent(ownerPipeline.parcel.nom_com)}`,
+                },
+                {
+                  label: "BODACC",
+                  desc: "Annonces légales & judiciaires",
+                  url: `https://www.bodacc.fr/pages/annonces-commerciales-encours/?q=${encodeURIComponent(ownerPipeline.parcel.nom_com)}`,
+                },
+                {
+                  label: "Géoportail · Fiche parcellaire",
+                  desc: `Section ${ownerPipeline.parcel.section} n°${ownerPipeline.parcel.numero}`,
+                  url: `https://www.geoportail.gouv.fr/carte?c=${ownerPipeline.parcel.lngLat.lng},${ownerPipeline.parcel.lngLat.lat}&z=18&l0=GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2::GEOPORTAIL:OGC:WMTS(1)&l1=CADASTRALPARCELS.PARCELLAIRE_EXPRESS::GEOPORTAIL:OGC:WMTS(0.7)&permalink=yes`,
+                },
+                {
+                  label: "Infogreffe",
+                  desc: "Registre du commerce & sociétés",
+                  url: `https://www.infogreffe.fr/`,
+                },
+              ].map(({ label, desc, url }) => (
+                <a
+                  key={label}
+                  href={url}
+                  target="_blank" rel="noopener noreferrer"
+                  className="block px-3 py-2 rounded-lg bg-zinc-800/50 border border-zinc-700/30 hover:border-zinc-600 hover:bg-zinc-700/60 transition-colors group"
+                >
+                  <div className="text-[10px] text-zinc-400 font-medium group-hover:text-zinc-300 transition-colors">{label} →</div>
+                  <div className="text-[9px] text-zinc-600 mt-0.5 leading-tight truncate">{desc}</div>
+                </a>
+              ))}
+            </div>
+          </div>
         </div>
       )}
 
@@ -911,6 +1356,18 @@ function StreetViewIcon() {
       <circle cx="6.5" cy="4" r="2.2" />
       <path d="M3 12c0-2 1.6-3.5 3.5-3.5S10 10 10 12" />
       <line x1="6.5" y1="8.5" x2="6.5" y2="12" />
+    </svg>
+  )
+}
+
+function GlobeIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="6.5" cy="6.5" r="5.5" />
+      <ellipse cx="6.5" cy="6.5" rx="2.5" ry="5.5" />
+      <line x1="1" y1="6.5" x2="12" y2="6.5" />
+      <line x1="2" y1="3.5" x2="11" y2="3.5" />
+      <line x1="2" y1="9.5" x2="11" y2="9.5" />
     </svg>
   )
 }
