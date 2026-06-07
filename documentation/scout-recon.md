@@ -155,7 +155,7 @@ Users can schedule recurring Scout runs on a saved polygon via the [Alerts & Wat
 ---
 
 ## Tech
-- Frontend: React, MapLibre GL JS (grid overlay, tile colour-coding), TanStack Query, WebSockets
+- Frontend: Next.js, MapLibre GL JS (grid overlay, tile colour-coding), TanStack Query, WebSockets
 - Backend: TypeScript + Fastify (Geo/Urbex Service — job orchestration)
 - Workers: Python + Celery (ruin repo) — YOLO, GDAL, PDAL, LiDAR processing
 - Data pipelines: ruin repo — Kafka (tile job queue), Polars (batch scoring)

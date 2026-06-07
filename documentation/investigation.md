@@ -95,7 +95,7 @@ If an investigated entity is a place (coordinates, address, or known physical lo
 ---
 
 ## Tech
-- Frontend: React, Sigma.js, D3.js, TanStack Query, WebSockets
+- Frontend: Next.js, Sigma.js, D3.js, TanStack Query, WebSockets
 - Backend: TypeScript + Fastify (Investigation Service)
 - Workers: Python + Celery (ruin repo)
 - Graph DB: Neo4j + GDS

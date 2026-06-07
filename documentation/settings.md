@@ -66,7 +66,7 @@ Securely stored in HashiCorp Vault, never exposed in the UI after saving.
 ---
 
 ## Tech
-- Frontend: React, React Hook Form, Zod (settings validation)
+- Frontend: Next.js, React Hook Form, Zod (settings validation)
 - Backend: TypeScript + Fastify
 - Secrets: HashiCorp Vault (API keys never stored in plaintext)
 - DB: PostgreSQL (user preferences, source config)

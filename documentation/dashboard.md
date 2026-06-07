@@ -66,7 +66,7 @@ The home screen of the application. Gives the user an at-a-glance overview of ev
 ---
 
 ## Tech
-- Frontend: React, TanStack Query, WebSockets (live feed)
+- Frontend: Next.js, TanStack Query, WebSockets (live feed)
 - Backend: TypeScript + Fastify (all services contribute status data)
 - DB: PostgreSQL (case/alert state), Elasticsearch (feed), Redis (system metrics)
 

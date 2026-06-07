@@ -103,7 +103,7 @@ The Phantom report contains:
 ---
 
 ## Tech
-- Frontend: React, MapLibre GL JS (polygon draw tool), D3.js (timeline), TanStack Query
+- Frontend: Next.js, MapLibre GL JS (polygon draw tool), D3.js (timeline), TanStack Query
 - Backend: TypeScript + Fastify (Geo/Urbex Service orchestrates the pipeline)
 - AI/Processing: Python (ruin repo) — YOLO, GDAL, PDAL, Rasterio, LlamaIndex, Ollama
 - Data pipelines: ruin repo — Kafka, Polars

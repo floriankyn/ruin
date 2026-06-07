@@ -233,7 +233,7 @@ Scrapers monitor urbex forums, Reddit, Instagram hashtags, YouTube, and known ur
 ---
 
 ## Tech
-- Frontend: React, MapLibre GL JS, TanStack Query, WebSockets
+- Frontend: Next.js, MapLibre GL JS, TanStack Query, WebSockets
 - Backend: TypeScript + Fastify (Geo/Urbex Service)
 - Tile server: Martin (PMTiles)
 - Geospatial processing: GDAL, tippecanoe, Rasterio (ruin repo)
