@@ -1,0 +1,211 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="SELECTIVE" />
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="b900e1e5-ca95-4511-b899-9a789636ecaf" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/documentation/ai-assistant.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/documentation/alerts.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/documentation/dashboard.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/documentation/investigation.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/documentation/osint-pipeline.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/documentation/phantom.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/documentation/scout-recon.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/documentation/settings.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/documentation/urbex.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/webapp/.gitignore" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/webapp/AGENTS.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/webapp/CLAUDE.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/webapp/README.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/webapp/bun.lock" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/webapp/eslint.config.mjs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/webapp/next.config.ts" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/webapp/package.json" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/webapp/postcss.config.mjs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/webapp/public/file.svg" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/webapp/public/globe.svg" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/webapp/public/next.svg" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/webapp/public/vercel.svg" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/webapp/public/window.svg" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/webapp/src/app/favicon.ico" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/webapp/src/app/globals.css" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/webapp/src/app/layout.tsx" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/webapp/src/app/page.tsx" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/webapp/tsconfig.json" beforeDir="false" />
+    </list>
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="CopilotPersistence">
+    <persistenceIdMap>
+      <entry key="_/Users/florianlepage/Github/ruin" value="3Eobb6JCPpPoevKT5qybCCsVUVU" />
+    </persistenceIdMap>
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="McpProjectServerCommands">
+    <commands />
+    <urls />
+  </component>
+  <component name="NextEditCompletionFeaturesState">
+    <decayedCancelled>
+      <entry key="MS100" value="1.1894645708138007" />
+      <entry key="MS500" value="1.7179487862820086" />
+      <entry key="S2" value="2.0967194511729694" />
+      <entry key="S5" value="2.466999148857376" />
+      <entry key="S10" value="2.6904485577339723" />
+      <entry key="S30" value="2.92463204885916" />
+      <entry key="S60" value="3.2119203122482163" />
+      <entry key="M2" value="3.81678033470029" />
+      <entry key="M5" value="5.087688746275773" />
+      <entry key="M10" value="6.2347995771780065" />
+      <entry key="M15" value="6.873565570621419" />
+      <entry key="M30" value="7.752302265807756" />
+      <entry key="H1" value="8.319366599425205" />
+      <entry key="H2" value="8.643860085230923" />
+      <entry key="H4" value="8.817748936813551" />
+      <entry key="D1" value="8.969023871560298" />
+      <entry key="W1" value="8.995559849767776" />
+    </decayedCancelled>
+    <decayedSelected>
+      <entry key="MS100" value="0.0" />
+      <entry key="MS500" value="0.0" />
+      <entry key="S2" value="6.3220784710112996E-192" />
+      <entry key="S5" value="4.337283893627347E-77" />
+      <entry key="S10" value="1.0311002921634614E-38" />
+      <entry key="S30" value="4.424815092472309E-13" />
+      <entry key="S60" value="1.1489854294504681E-6" />
+      <entry key="M2" value="0.001855348110787993" />
+      <entry key="M5" value="0.15616135038810294" />
+      <entry key="M10" value="0.6844408437193396" />
+      <entry key="M15" value="1.1201129448998939" />
+      <entry key="M30" value="1.8331173303444293" />
+      <entry key="H1" value="2.345068003821859" />
+      <entry key="H2" value="2.6523954151773763" />
+      <entry key="H4" value="2.8208483685104793" />
+      <entry key="D1" value="2.969370113949756" />
+      <entry key="W1" value="2.9956050328885655" />
+    </decayedSelected>
+    <decayedShown>
+      <entry key="MS100" value="0.9584158789229404" />
+      <entry key="MS500" value="1.4668172597238895" />
+      <entry key="S2" value="2.0044163350652324" />
+      <entry key="S5" value="2.426529232056358" />
+      <entry key="S10" value="2.669497701887516" />
+      <entry key="S30" value="2.917462281208719" />
+      <entry key="S60" value="3.208283073160319" />
+      <entry key="M2" value="3.8167586785835796" />
+      <entry key="M5" value="5.242736854247882" />
+      <entry key="M10" value="6.91811610239806" />
+      <entry key="M15" value="7.9926201671775114" />
+      <entry key="M30" value="9.58463859266176" />
+      <entry key="H1" value="10.663953849725736" />
+      <entry key="H2" value="11.295988053049562" />
+      <entry key="H4" value="11.638456164928733" />
+      <entry key="D1" value="11.938369372440038" />
+      <entry key="W1" value="11.991161339008846" />
+    </decayedShown>
+  </component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 2,
+  &quot;fromUser&quot;: false
+}</component>
+  <component name="ProjectId" id="3Eobb6JCPpPoevKT5qybCCsVUVU" />
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.MCP Project settings loaded&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;add-auth&quot;,
+    &quot;javascript.preferred.runtime.type.id&quot;: &quot;bun&quot;,
+    &quot;kronk.content.tree.expanded.paths&quot;: &quot;&quot;,
+    &quot;last_opened_file_path&quot;: &quot;/Users/florianlepage/Github/ruin&quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;bun&quot;,
+    &quot;ts.external.directory.path&quot;: &quot;/Users/florianlepage/Github/ruin/node_modules/typescript/lib&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
+  }
+}</component>
+  <component name="ReactDesignerToolWindowState">
+    <option name="myId2Visible">
+      <map>
+        <entry key="com.intellij.reactbuddy.reactComponents" value="false" />
+        <entry key="com.intellij.reactbuddy.reactInspector" value="false" />
+        <entry key="com.intellij.reactbuddy.storybook" value="false" />
+      </map>
+    </option>
+  </component>
+  <component name="SharedIndexes">
+    <attachedChunks>
+      <set>
+        <option value="bundled-js-predefined-d6986cc7102b-31caf2ab9e3c-JavaScript-WS-261.25134.101" />
+      </set>
+    </attachedChunks>
+  </component>
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="Default task">
+      <changelist id="b900e1e5-ca95-4511-b899-9a789636ecaf" name="Changes" comment="" />
+      <created>1780847938109</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1780847938109</updated>
+      <workItem from="1780847939213" duration="3376000" />
+    </task>
+    <task id="LOCAL-00001" summary="update: migrate frontend references from React to Next.js">
+      <option name="closed" value="true" />
+      <created>1780848652444</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1780848652444</updated>
+    </task>
+    <option name="localTasksCounter" value="2" />
+    <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
+  </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="update: migrate frontend references from React to Next.js" />
+    <option name="LAST_COMMIT_MESSAGE" value="update: migrate frontend references from React to Next.js" />
+  </component>
+  <component name="com.gk646.codestats.settings.Save">
+    <option name="commitTimePoints">
+      <list>
+        <TimePoint>
+          <option name="timestamp" value="1780848656606" />
+          <option name="linesCode" value="3057778" />
+          <option name="totalLines" value="5366762" />
+          <option name="info" value="update: migrate frontend references from React to " />
+        </TimePoint>
+      </list>
+    </option>
+    <option name="genericTimePoints">
+      <list>
+        <TimePoint>
+          <option name="timestamp" value="1780848656606" />
+          <option name="linesCode" value="3057778" />
+          <option name="totalLines" value="5366762" />
+          <option name="info" value="Jun 7, 2026" />
+        </TimePoint>
+      </list>
+    </option>
+  </component>
+</project>
