@@ -46,10 +46,40 @@ interface NominatimResult {
   display_name: string
   lat: string
   lon: string
-  boundingbox: [string, string, string, string] // [minLat, maxLat, minLng, maxLng]
+  boundingbox: [string, string, string, string]
+}
+
+interface WaybackVersion {
+  id: string    // config key — used in tile URL
+  date: string  // ISO date from itemTitle, e.g. "2026-05-28"
+  label: string // formatted for display, e.g. "May 2026"
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
+
+const WAYBACK_CONFIG_URL =
+  "https://s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json"
+
+function waybackTileUrl(id: string): string {
+  // Esri Wayback WMTS — {level}/{row}/{col} maps to MapLibre's {z}/{y}/{x}
+  return `https://wayback.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/WMTS/1.0.0/default028mm/MapServer/tile/${id}/{z}/{y}/{x}`
+}
+
+function formatWaybackDate(iso: string): string {
+  try {
+    return new Date(iso + "T00:00:00Z").toLocaleDateString("en-US", {
+      month: "short",
+      year: "numeric",
+      timeZone: "UTC",
+    })
+  } catch {
+    return iso
+  }
+}
+
+const ESRI_SATELLITE_TILES = [
+  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+]
 
 function rasterStyle(
   tiles: string[],
@@ -66,21 +96,6 @@ function rasterStyle(
       { id: "raster-tiles", type: "raster", source: "tiles" },
     ],
   }
-}
-
-const CURRENT_YEAR = new Date().getFullYear()
-const MIN_SAT_YEAR = 2002  // MODIS Terra TrueColor archive start
-const MAX_SAT_YEAR = CURRENT_YEAR - 1  // current year archive is incomplete mid-year
-
-const ESRI_SATELLITE_TILES = [
-  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-]
-
-// NASA GIBS WMTS — free, no API key. Mid-June chosen for clearest NH-summer imagery.
-function gibsTiles(year: number): string[] {
-  return [
-    `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_CorrectedReflectance_TrueColor/default/${year}-06-15/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg`,
-  ]
 }
 
 const STYLES: Record<BaseLayer, StyleSpecification> = {
@@ -103,7 +118,6 @@ const STYLES: Record<BaseLayer, StyleSpecification> = {
     "© OpenStreetMap contributors, © OpenTopoMap",
     "#d8e8d0"
   ),
-  // "Latest" = Esri World Imagery. Historical years switch to NASA GIBS MODIS Terra via setTiles().
   satellite: rasterStyle(
     ESRI_SATELLITE_TILES,
     "© Esri, Maxar, Earthstar Geographics",
@@ -111,8 +125,8 @@ const STYLES: Record<BaseLayer, StyleSpecification> = {
   ),
 }
 
-// MapLibre GL v5 rejects ["get", "prop"] arrays inside legacy filters — use bare string "prop" instead.
-// Split the single "lines" layer into active/inactive so line-dasharray can be a static value.
+// MapLibre GL v5: legacy filter arrays reject ["get","prop"] sub-arrays — use bare strings.
+// Split active/inactive line layers so line-dasharray can be a static value.
 const DRAW_STYLES = [
   {
     id: "gl-draw-polygon-fill",
@@ -209,39 +223,27 @@ const DORKS: { label: string; template: (loc: string) => string }[] = [
 function computeCentroid(geometry: GeoJSON.Polygon): [number, number] {
   const ring = geometry.coordinates[0]
   const n = ring.length - 1
-  let sumLng = 0
-  let sumLat = 0
-  for (let i = 0; i < n; i++) {
-    sumLng += ring[i][0]
-    sumLat += ring[i][1]
-  }
+  let sumLng = 0; let sumLat = 0
+  for (let i = 0; i < n; i++) { sumLng += ring[i][0]; sumLat += ring[i][1] }
   return [sumLng / n, sumLat / n]
 }
 
 function makeMarkerEl(color: string): HTMLDivElement {
   const el = document.createElement("div")
   Object.assign(el.style, {
-    width: "16px",
-    height: "16px",
-    borderRadius: "50%",
-    background: color,
-    border: "2px solid rgba(255,255,255,0.75)",
-    boxShadow: "0 2px 6px rgba(0,0,0,0.5)",
-    cursor: "pointer",
-    transition: "transform 0.1s",
+    width: "16px", height: "16px", borderRadius: "50%", background: color,
+    border: "2px solid rgba(255,255,255,0.75)", boxShadow: "0 2px 6px rgba(0,0,0,0.5)",
+    cursor: "pointer", transition: "transform 0.1s",
   })
   el.addEventListener("mouseenter", () => { el.style.transform = "scale(1.35)" })
   el.addEventListener("mouseleave", () => { el.style.transform = "scale(1)" })
   return el
 }
 
-function clamp(v: number, lo: number, hi: number) {
-  return Math.max(lo, Math.min(hi, v))
-}
+function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, v)) }
 
-// Terrain overlay: raster-dem source (Terrarium encoding, AWS elevation tiles, free)
-// + hillshade layer (2D shading) + 3D terrain extrusion via map.setTerrain().
-// Must be added BEFORE draw layers so hillshade sits below draw annotations.
+// Terrain overlay: AWS Terrarium raster-dem → hillshade layer + 3D extrusion.
+// Must be inserted BEFORE draw layers so hillshade sits under draw annotations.
 function addTerrainOverlay(map: maplibregl.Map) {
   if (map.getSource("terrain-dem")) return
   map.addSource("terrain-dem", {
@@ -251,7 +253,6 @@ function addTerrainOverlay(map: maplibregl.Map) {
     tileSize: 256,
     maxzoom: 15,
   })
-  // Insert before the first draw layer so hillshade is rendered below draw annotations
   const firstDrawLayer = map.getStyle()?.layers?.find((l) => l.id.startsWith("gl-draw-"))?.id
   map.addLayer(
     {
@@ -269,11 +270,8 @@ function addTerrainOverlay(map: maplibregl.Map) {
     firstDrawLayer
   )
   try {
-    // 3D terrain — extrudes the map surface; user can tilt (right-drag) to see the effect
     map.setTerrain({ source: "terrain-dem", exaggeration: 1.5 })
-  } catch {
-    // setTerrain may fail on some style configs; hillshade still provides the 2D effect
-  }
+  } catch { /* setTerrain may not be available in all style configs */ }
 }
 
 function removeTerrainOverlay(map: maplibregl.Map) {
@@ -293,10 +291,10 @@ export default function UrbexMap() {
   const labelMarkersRef = useRef<Map<string, maplibregl.Marker>>(new Map())
   const polygonsRef = useRef<DrawnPolygon[]>([])
   const baseLayerRef = useRef<BaseLayer>("dark")
-  // Prevents React 19 Strict Mode's double-invoke from creating two map instances
   const initRef = useRef(false)
-  // Refs kept in sync with their state counterparts for use inside map event callbacks
-  const satelliteYearRef = useRef<number | null>(null)
+  // Refs kept current for use inside async style.load callbacks
+  const waybackIdxRef = useRef<number | null>(null)
+  const waybackVersionsRef = useRef<WaybackVersion[]>([])
   const terrainOverlayRef = useRef(false)
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -312,13 +310,18 @@ export default function UrbexMap() {
   const [researchQuery, setResearchQuery] = useState("")
   const [useCtx, setUseCtx] = useState(true)
   const [toast, setToast] = useState<string | null>(null)
-  const [satelliteYear, setSatelliteYear] = useState<number | null>(null)
+  // Wayback imagery
+  const [waybackVersions, setWaybackVersions] = useState<WaybackVersion[]>([])
+  const [waybackIdx, setWaybackIdx] = useState<number | null>(null) // null = Latest (Esri)
+  const [waybackLoading, setWaybackLoading] = useState(false)
+  // Overlays
   const [terrainOverlay, setTerrainOverlay] = useState(false)
+  const [overlaysOpen, setOverlaysOpen] = useState(false)
+  // Search
   const [searchQuery, setSearchQuery] = useState("")
   const [searchResults, setSearchResults] = useState<NominatimResult[]>([])
   const [searchOpen, setSearchOpen] = useState(false)
 
-  // Keep ref in sync so event handlers inside init useEffect always see latest polygons
   useEffect(() => { polygonsRef.current = polygons }, [polygons])
 
   const showToast = useCallback((msg: string) => {
@@ -326,7 +329,7 @@ export default function UrbexMap() {
     setTimeout(() => setToast(null), 3000)
   }, [])
 
-  // ── Map initialisation ──────────────────────────────────────────────────────
+  // ── Map init ──────────────────────────────────────────────────────────────
   useEffect(() => {
     if (initRef.current || !containerRef.current) return
     initRef.current = true
@@ -342,12 +345,9 @@ export default function UrbexMap() {
       doubleClickZoom: true,
       touchZoomRotate: true,
     })
-
     mapRef.current = map
 
-    map.on("mousemove", (e) => {
-      setCoords({ lng: e.lngLat.lng, lat: e.lngLat.lat })
-    })
+    map.on("mousemove", (e) => setCoords({ lng: e.lngLat.lng, lat: e.lngLat.lat }))
 
     map.on("contextmenu", (e) => {
       e.preventDefault()
@@ -357,15 +357,12 @@ export default function UrbexMap() {
       setAreaMenuPos(null)
     })
 
-    map.on("click", () => {
-      setContextMenu(null)
-    })
+    map.on("click", () => setContextMenu(null))
 
     map.once("load", () => {
       if (!mapRef.current) return
       map.resize()
 
-      // Terrain overlay added before draw so hillshade sits below draw layers
       if (terrainOverlayRef.current) addTerrainOverlay(map)
 
       const draw = new MapboxDraw({
@@ -380,7 +377,6 @@ export default function UrbexMap() {
       map.on("draw.create", (e: { features: GeoJSON.Feature[] }) => {
         const feature = e.features[0]
         if (!feature || feature.geometry.type !== "Polygon") return
-
         const poly: DrawnPolygon = {
           id: String(feature.id),
           geometry: feature.geometry as GeoJSON.Polygon,
@@ -389,27 +385,16 @@ export default function UrbexMap() {
           timestamp: new Date(),
         }
         setPolygons((prev) => [...prev, poly])
-
         const [lng, lat] = computeCentroid(poly.geometry)
         const labelEl = document.createElement("div")
         Object.assign(labelEl.style, {
-          background: "rgba(0,0,0,0.72)",
-          color: "#d4d4d8",
-          fontSize: "11px",
-          fontFamily: "ui-sans-serif, system-ui, sans-serif",
-          padding: "2px 8px",
-          borderRadius: "4px",
-          whiteSpace: "nowrap",
-          pointerEvents: "none",
+          background: "rgba(0,0,0,0.72)", color: "#d4d4d8", fontSize: "11px",
+          fontFamily: "ui-sans-serif, system-ui, sans-serif", padding: "2px 8px",
+          borderRadius: "4px", whiteSpace: "nowrap", pointerEvents: "none",
           border: "1px solid rgba(255,255,255,0.1)",
         })
         labelEl.textContent = poly.label
-
-        const labelMarker = new maplibregl.Marker({ element: labelEl })
-          .setLngLat([lng, lat])
-          .addTo(map)
-        labelMarkersRef.current.set(poly.id, labelMarker)
-
+        labelMarkersRef.current.set(poly.id, new maplibregl.Marker({ element: labelEl }).setLngLat([lng, lat]).addTo(map))
         draw.changeMode("simple_select")
       })
 
@@ -417,17 +402,12 @@ export default function UrbexMap() {
         if (!e.features.length) return
         const feature = e.features[0]
         if (feature.geometry.type !== "Polygon") return
-
         const poly = polygonsRef.current.find((p) => p.id === String(feature.id))
         if (!poly) return
-
         const [lng, lat] = computeCentroid(poly.geometry)
         const pt = map.project([lng, lat])
-        const x = clamp(pt.x - 112, 8, window.innerWidth - 240)
-        const y = clamp(pt.y - 20, 8, window.innerHeight - 420)
-
         setSelectedPolygon(poly)
-        setAreaMenuPos({ x, y })
+        setAreaMenuPos({ x: clamp(pt.x - 112, 8, window.innerWidth - 240), y: clamp(pt.y - 20, 8, window.innerHeight - 420) })
         setSelectedCheckpoint(null)
         setContextMenu(null)
       })
@@ -441,7 +421,7 @@ export default function UrbexMap() {
     }
   }, [])
 
-  // ── Base layer switching ────────────────────────────────────────────────────
+  // ── Base layer switch ──────────────────────────────────────────────────────
   useEffect(() => {
     const map = mapRef.current
     if (!map || baseLayer === baseLayerRef.current) return
@@ -458,13 +438,16 @@ export default function UrbexMap() {
     map.setStyle(STYLES[baseLayer])
 
     map.once("style.load", () => {
-      // Apply historical GIBS tiles if a year was selected in satellite mode
-      if (baseLayer === "satellite" && satelliteYearRef.current !== null) {
-        const src = map.getSource("tiles") as maplibregl.RasterTileSource | undefined
-        src?.setTiles(gibsTiles(satelliteYearRef.current))
+      // Restore selected Wayback snapshot if we're switching back to satellite
+      if (baseLayer === "satellite") {
+        const idx = waybackIdxRef.current
+        const versions = waybackVersionsRef.current
+        if (idx !== null && versions[idx]) {
+          const src = map.getSource("tiles") as maplibregl.RasterTileSource | undefined
+          src?.setTiles([waybackTileUrl(versions[idx].id)])
+        }
       }
 
-      // Re-apply terrain overlay (hillshade before draw layers for correct z-order)
       if (terrainOverlayRef.current) addTerrainOverlay(map)
 
       const newDraw = new MapboxDraw({
@@ -475,53 +458,64 @@ export default function UrbexMap() {
       })
       map.addControl(newDraw as unknown as maplibregl.IControl)
       drawRef.current = newDraw
-
-      if (savedFeatures && savedFeatures.features.length > 0) {
-        newDraw.set(savedFeatures)
-      }
-      // draw.create / draw.selectionchange stay registered on the map object
+      if (savedFeatures && savedFeatures.features.length > 0) newDraw.set(savedFeatures)
     })
   }, [baseLayer])
 
-  // ── Satellite year tile swap ────────────────────────────────────────────────
+  // ── Fetch Esri Wayback catalog (lazy — first time satellite is selected) ───
   useEffect(() => {
-    satelliteYearRef.current = satelliteYear
+    if (baseLayer !== "satellite" || waybackVersions.length > 0 || waybackLoading) return
+    setWaybackLoading(true)
+    fetch(WAYBACK_CONFIG_URL)
+      .then((r) => r.json())
+      .then((data: Record<string, { itemTitle: string }>) => {
+        const versions: WaybackVersion[] = Object.entries(data)
+          .map(([id, v]) => {
+            const match = v.itemTitle.match(/(\d{4}-\d{2}-\d{2})/)
+            if (!match) return null
+            return { id, date: match[1], label: formatWaybackDate(match[1]) }
+          })
+          .filter(Boolean) as WaybackVersion[]
+        // oldest first so slider left = old, right = new (matching Google Earth UX)
+        versions.sort((a, b) => a.date.localeCompare(b.date))
+        waybackVersionsRef.current = versions
+        setWaybackVersions(versions)
+      })
+      .catch(() => { /* silently fall back to Latest */ })
+      .finally(() => setWaybackLoading(false))
+  }, [baseLayer, waybackVersions.length, waybackLoading])
+
+  // ── Wayback tile swap ──────────────────────────────────────────────────────
+  useEffect(() => {
+    waybackIdxRef.current = waybackIdx
     if (baseLayer !== "satellite") return
     const map = mapRef.current
     if (!map || !map.isStyleLoaded()) return
-
     const src = map.getSource("tiles") as maplibregl.RasterTileSource | undefined
     if (!src) return
+    if (waybackIdx === null) {
+      src.setTiles(ESRI_SATELLITE_TILES)
+    } else if (waybackVersions[waybackIdx]) {
+      src.setTiles([waybackTileUrl(waybackVersions[waybackIdx].id)])
+    }
+  }, [waybackIdx, baseLayer, waybackVersions])
 
-    src.setTiles(satelliteYear === null ? ESRI_SATELLITE_TILES : gibsTiles(satelliteYear))
-  }, [satelliteYear, baseLayer])
-
-  // ── Terrain overlay toggle ──────────────────────────────────────────────────
+  // ── Terrain overlay toggle ─────────────────────────────────────────────────
   useEffect(() => {
     terrainOverlayRef.current = terrainOverlay
     const map = mapRef.current
     if (!map || !map.isStyleLoaded()) return
-
-    if (terrainOverlay) {
-      addTerrainOverlay(map)
-    } else {
-      removeTerrainOverlay(map)
-    }
+    terrainOverlay ? addTerrainOverlay(map) : removeTerrainOverlay(map)
   }, [terrainOverlay])
 
-  // ── Add checkpoint ──────────────────────────────────────────────────────────
+  // ── Add checkpoint ─────────────────────────────────────────────────────────
   const addCheckpoint = useCallback((lngLat: { lng: number; lat: number }, status: StatusKey) => {
     const cfg = STATUSES.find((s) => s.key === status)!
     const id = crypto.randomUUID()
     const cp: Checkpoint = { id, lngLat, status, label: "", notes: "", timestamp: new Date() }
-
     setCheckpoints((prev) => [...prev, cp])
-
     const el = makeMarkerEl(cfg.color)
-    const marker = new maplibregl.Marker({ element: el })
-      .setLngLat([lngLat.lng, lngLat.lat])
-      .addTo(mapRef.current!)
-
+    const marker = new maplibregl.Marker({ element: el }).setLngLat([lngLat.lng, lngLat.lat]).addTo(mapRef.current!)
     el.addEventListener("click", (e) => {
       e.stopPropagation()
       setSelectedCheckpoint(cp)
@@ -529,24 +523,17 @@ export default function UrbexMap() {
       setSelectedPolygon(null)
       setAreaMenuPos(null)
     })
-
     markersRef.current.set(id, marker)
     setContextMenu(null)
   }, [])
 
-  const startDraw = useCallback(() => {
-    drawRef.current?.changeMode("draw_polygon")
-  }, [])
+  const startDraw = useCallback(() => { drawRef.current?.changeMode("draw_polygon") }, [])
 
-  // ── Place search (Nominatim, debounced 400ms) ───────────────────────────────
+  // ── Place search (Nominatim, 400ms debounce) ───────────────────────────────
   const handleSearchInput = useCallback((query: string) => {
     setSearchQuery(query)
     if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current)
-    if (!query.trim()) {
-      setSearchResults([])
-      setSearchOpen(false)
-      return
-    }
+    if (!query.trim()) { setSearchResults([]); setSearchOpen(false); return }
     searchTimeoutRef.current = setTimeout(async () => {
       try {
         const res = await fetch(
@@ -556,7 +543,7 @@ export default function UrbexMap() {
         const data: NominatimResult[] = await res.json()
         setSearchResults(data)
         setSearchOpen(data.length > 0)
-      } catch { /* ignore network errors */ }
+      } catch { /* ignore */ }
     }, 400)
   }, [])
 
@@ -577,14 +564,26 @@ export default function UrbexMap() {
     ? `${computeCentroid(selectedPolygon.geometry)[1].toFixed(4)},${computeCentroid(selectedPolygon.geometry)[0].toFixed(4)}`
     : ""
 
-  // ── Render ──────────────────────────────────────────────────────────────────
+  // Wayback slider helpers — oldest (idx=0) on left, newest (idx=max) on right
+  const maxIdx = waybackVersions.length - 1
+  const sliderVal = waybackIdx ?? maxIdx  // null → show at right end
+
+  const stepOlder = () => setWaybackIdx((i) => {
+    if (i === null) return maxIdx              // Latest → most recent Wayback
+    return Math.max(0, i - 1)
+  })
+  const stepNewer = () => setWaybackIdx((i) => {
+    if (i === null || i >= maxIdx) return null // already at or past newest → Latest
+    return i + 1
+  })
+
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div style={{ position: "fixed", inset: 0, background: "#09090b" }}>
       <div ref={containerRef} style={{ position: "absolute", inset: 0 }} />
 
-      {/* ── Search bar + Draw button — top left ────────────────────────────── */}
+      {/* ── Search + Draw — top left ────────────────────────────────────────── */}
       <div className="absolute top-4 left-4 z-20 flex flex-col gap-2">
-        {/* Place search */}
         <div className="relative">
           <div className="flex items-center gap-2 bg-zinc-900/90 backdrop-blur-sm border border-zinc-700/60 rounded-lg px-3 py-2 shadow-lg w-64">
             <SearchIcon />
@@ -601,9 +600,7 @@ export default function UrbexMap() {
               <button
                 onClick={() => { setSearchQuery(""); setSearchResults([]); setSearchOpen(false) }}
                 className="text-zinc-500 hover:text-zinc-300 text-lg leading-none flex-shrink-0"
-              >
-                ×
-              </button>
+              >×</button>
             )}
           </div>
           {searchOpen && searchResults.length > 0 && (
@@ -621,7 +618,6 @@ export default function UrbexMap() {
           )}
         </div>
 
-        {/* Draw polygon */}
         <button
           onClick={startDraw}
           className="flex items-center gap-2 w-fit bg-zinc-900/90 backdrop-blur-sm text-zinc-200 text-sm px-3 py-2 rounded-lg border border-zinc-700/60 hover:bg-zinc-800 hover:text-white transition-colors shadow-lg"
@@ -631,38 +627,75 @@ export default function UrbexMap() {
         </button>
       </div>
 
-      {/* ── Base layer switcher — top right ──────────────────────────────────── */}
-      <div className="absolute top-4 right-4 z-10 flex flex-col gap-0.5 bg-zinc-900/90 backdrop-blur-sm border border-zinc-700/60 rounded-xl p-1.5 shadow-lg">
-        {BASE_LAYERS.map(({ key, label }) => (
-          <button
-            key={key}
-            onClick={() => setBaseLayer(key)}
-            className={`text-xs px-3 py-1.5 rounded-lg transition-colors text-left whitespace-nowrap ${
-              baseLayer === key
-                ? "bg-zinc-100 text-zinc-900 font-semibold"
-                : "text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
-            }`}
-          >
-            {label}
-          </button>
-        ))}
+      {/* ── Layer switcher + Overlays — top right ───────────────────────────── */}
+      <div className="absolute top-4 right-4 z-20 flex flex-col gap-2 items-end">
+        {/* Base layer pills */}
+        <div className="flex flex-col gap-0.5 bg-zinc-900/90 backdrop-blur-sm border border-zinc-700/60 rounded-xl p-1.5 shadow-lg">
+          {BASE_LAYERS.map(({ key, label }) => (
+            <button
+              key={key}
+              onClick={() => setBaseLayer(key)}
+              className={`text-xs px-3 py-1.5 rounded-lg transition-colors text-left whitespace-nowrap ${
+                baseLayer === key
+                  ? "bg-zinc-100 text-zinc-900 font-semibold"
+                  : "text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {/* Overlays button */}
+        <button
+          onClick={() => setOverlaysOpen((v) => !v)}
+          className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border shadow transition-colors ${
+            overlaysOpen || terrainOverlay
+              ? "bg-zinc-100 text-zinc-900 border-zinc-300 font-semibold"
+              : "bg-zinc-900/90 backdrop-blur-sm text-zinc-400 border-zinc-700/60 hover:text-zinc-200 hover:bg-zinc-800"
+          }`}
+        >
+          <LayersIcon active={overlaysOpen || terrainOverlay} />
+          Overlays
+          <span className="ml-0.5 opacity-60">{overlaysOpen ? "▲" : "▼"}</span>
+        </button>
+
+        {/* Overlays panel */}
+        {overlaysOpen && (
+          <div className="bg-zinc-900/95 backdrop-blur-sm border border-zinc-700/60 rounded-xl shadow-2xl overflow-hidden w-56">
+            <div className="px-3 py-2 border-b border-zinc-800">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Map Overlays</span>
+            </div>
+            <div className="p-2 flex flex-col gap-0.5">
+              <OverlayToggle
+                label="Terrain & Hillshade"
+                description="3D elevation · right-drag to tilt"
+                checked={terrainOverlay}
+                onChange={setTerrainOverlay}
+              />
+              {/* Future toggles go here */}
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* ── Coordinate readout — bottom left ─────────────────────────────────── */}
+      {/* ── Coord readout — bottom left ─────────────────────────────────────── */}
       <div className="absolute bottom-4 left-4 z-10 select-none bg-zinc-900/80 backdrop-blur-sm font-mono text-[11px] text-zinc-400 px-3 py-1.5 rounded-lg border border-zinc-700/60 shadow">
         {coords.lat.toFixed(5)}, {coords.lng.toFixed(5)}
       </div>
 
-      {/* ── Satellite controls — bottom center, satellite mode only ──────────── */}
+      {/* ── Satellite timeline — bottom center ──────────────────────────────── */}
       {baseLayer === "satellite" && (
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 bg-zinc-900/90 backdrop-blur-sm border border-zinc-700/60 rounded-xl px-4 py-3 shadow-lg select-none" style={{ minWidth: 320 }}>
-          {/* Timeline header */}
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-[10px] uppercase tracking-wider font-medium text-zinc-500">Imagery Timeline</span>
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 bg-zinc-900/90 backdrop-blur-sm border border-zinc-700/60 rounded-xl px-4 py-3 shadow-lg select-none" style={{ minWidth: 340 }}>
+          {/* Header */}
+          <div className="flex items-center justify-between mb-2.5">
+            <span className="text-[10px] uppercase tracking-wider font-medium text-zinc-500">
+              Esri Imagery Timeline
+            </span>
             <button
-              onClick={() => setSatelliteYear(null)}
+              onClick={() => setWaybackIdx(null)}
               className={`text-xs px-2 py-0.5 rounded-md transition-colors font-medium ${
-                satelliteYear === null
+                waybackIdx === null
                   ? "bg-zinc-100 text-zinc-900"
                   : "text-zinc-400 hover:text-zinc-200"
               }`}
@@ -671,52 +704,60 @@ export default function UrbexMap() {
             </button>
           </div>
 
-          {/* Year slider */}
-          <div className="flex items-center gap-2.5">
-            <span className="text-[11px] text-zinc-500 w-8 text-right tabular-nums">{MIN_SAT_YEAR}</span>
-            <input
-              type="range"
-              min={MIN_SAT_YEAR}
-              max={MAX_SAT_YEAR}
-              value={satelliteYear ?? MAX_SAT_YEAR}
-              onChange={(e) => setSatelliteYear(Number(e.target.value))}
-              className="flex-1 h-1.5 appearance-none bg-zinc-700 rounded-full outline-none cursor-pointer"
-              style={{ accentColor: "#3b82f6" }}
-            />
-            <span className="text-[11px] text-zinc-500 w-8 tabular-nums">{MAX_SAT_YEAR}</span>
-          </div>
+          {/* Slider row */}
+          {waybackLoading ? (
+            <div className="text-[11px] text-zinc-500 text-center py-1">Loading versions…</div>
+          ) : waybackVersions.length > 0 ? (
+            <>
+              <div className="flex items-center gap-2">
+                {/* Left arrow — step older */}
+                <button
+                  onClick={stepOlder}
+                  disabled={waybackIdx === 0}
+                  className="w-6 h-6 flex items-center justify-center rounded-md bg-zinc-800 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed text-zinc-300 transition-colors flex-shrink-0 text-sm"
+                  title="Older"
+                >‹</button>
 
-          {/* Current selection label */}
-          <div className="text-center mt-1.5 h-4">
-            {satelliteYear !== null ? (
-              <span className="text-xs font-semibold text-blue-400 tabular-nums">{satelliteYear} · NASA GIBS MODIS Terra</span>
-            ) : (
-              <span className="text-xs text-zinc-500">Current imagery · Esri World</span>
-            )}
-          </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={maxIdx}
+                  value={sliderVal}
+                  onChange={(e) => {
+                    const v = Number(e.target.value)
+                    setWaybackIdx(v >= maxIdx ? null : v)
+                  }}
+                  className="flex-1 h-1.5 appearance-none bg-zinc-700 rounded-full outline-none cursor-pointer"
+                  style={{ accentColor: "#3b82f6" }}
+                />
 
-          {/* Terrain overlay toggle */}
-          <div className="flex items-center justify-between mt-3 pt-2.5 border-t border-zinc-800">
-            <div>
-              <span className="text-[11px] font-medium text-zinc-300">Terrain &amp; Hillshade</span>
-              <p className="text-[10px] text-zinc-600 mt-0.5">Hillshade + 3D extrusion · right-drag to tilt</p>
-            </div>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={terrainOverlay}
-              onClick={() => setTerrainOverlay((v) => !v)}
-              className={`relative flex-shrink-0 w-9 h-5 rounded-full transition-colors focus:outline-none ${terrainOverlay ? "bg-blue-500" : "bg-zinc-600"}`}
-            >
-              <span
-                className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${terrainOverlay ? "translate-x-4" : "translate-x-0.5"}`}
-              />
-            </button>
-          </div>
+                {/* Right arrow — step newer / Latest */}
+                <button
+                  onClick={stepNewer}
+                  disabled={waybackIdx === null}
+                  className="w-6 h-6 flex items-center justify-center rounded-md bg-zinc-800 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed text-zinc-300 transition-colors flex-shrink-0 text-sm"
+                  title="Newer"
+                >›</button>
+              </div>
+
+              {/* Date label */}
+              <div className="flex items-center justify-between mt-2">
+                <span className="text-[10px] text-zinc-600">{waybackVersions[0]?.label}</span>
+                <span className={`text-xs font-semibold tabular-nums ${waybackIdx === null ? "text-zinc-400" : "text-blue-400"}`}>
+                  {waybackIdx === null
+                    ? "Current · Live Esri"
+                    : `${waybackVersions[waybackIdx]?.label ?? ""} · Esri Wayback`}
+                </span>
+                <span className="text-[10px] text-zinc-600">{waybackVersions[maxIdx]?.label}</span>
+              </div>
+            </>
+          ) : (
+            <div className="text-[11px] text-zinc-500 text-center py-1">Unable to load history</div>
+          )}
         </div>
       )}
 
-      {/* ── Context menu (right-click) ────────────────────────────────────── */}
+      {/* ── Context menu ────────────────────────────────────────────────────── */}
       {contextMenu && (
         <div
           className="absolute z-20 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl overflow-hidden min-w-[196px]"
@@ -738,51 +779,28 @@ export default function UrbexMap() {
         </div>
       )}
 
-      {/* ── Checkpoint profile panel ──────────────────────────────────────── */}
+      {/* ── Checkpoint profile ───────────────────────────────────────────────── */}
       {selectedCheckpoint && (
         <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl p-4 w-72">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
-              <span
-                className="w-3 h-3 rounded-full flex-shrink-0"
-                style={{ background: STATUSES.find((s) => s.key === selectedCheckpoint.status)?.color }}
-              />
-              <span className="text-sm font-semibold text-zinc-100">
-                {STATUSES.find((s) => s.key === selectedCheckpoint.status)?.label}
-              </span>
+              <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: STATUSES.find((s) => s.key === selectedCheckpoint.status)?.color }} />
+              <span className="text-sm font-semibold text-zinc-100">{STATUSES.find((s) => s.key === selectedCheckpoint.status)?.label}</span>
             </div>
-            <button
-              onClick={() => setSelectedCheckpoint(null)}
-              className="text-zinc-500 hover:text-zinc-300 leading-none w-6 h-6 flex items-center justify-center text-xl"
-            >
-              ×
-            </button>
+            <button onClick={() => setSelectedCheckpoint(null)} className="text-zinc-500 hover:text-zinc-300 leading-none w-6 h-6 flex items-center justify-center text-xl">×</button>
           </div>
-          <div className="text-xs font-mono text-zinc-400 mb-1">
-            {selectedCheckpoint.lngLat.lat.toFixed(5)}, {selectedCheckpoint.lngLat.lng.toFixed(5)}
-          </div>
-          <div className="text-xs text-zinc-600">
-            {selectedCheckpoint.timestamp.toLocaleString()}
-          </div>
+          <div className="text-xs font-mono text-zinc-400 mb-1">{selectedCheckpoint.lngLat.lat.toFixed(5)}, {selectedCheckpoint.lngLat.lng.toFixed(5)}</div>
+          <div className="text-xs text-zinc-600">{selectedCheckpoint.timestamp.toLocaleString()}</div>
         </div>
       )}
 
-      {/* ── Area Action Menu ──────────────────────────────────────────────── */}
+      {/* ── Area Action Menu ─────────────────────────────────────────────────── */}
       {selectedPolygon && areaMenuPos && !researchOpen && (
-        <div
-          className="absolute z-20 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-56 overflow-hidden"
-          style={{ left: areaMenuPos.x, top: areaMenuPos.y }}
-        >
+        <div className="absolute z-20 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-56 overflow-hidden" style={{ left: areaMenuPos.x, top: areaMenuPos.y }}>
           <div className="flex items-center justify-between px-3 py-2.5 border-b border-zinc-800">
             <span className="text-sm font-semibold text-zinc-100 truncate">{selectedPolygon.label}</span>
-            <button
-              onClick={() => { setSelectedPolygon(null); setAreaMenuPos(null) }}
-              className="text-zinc-500 hover:text-zinc-300 leading-none ml-2 flex-shrink-0 w-5 h-5 flex items-center justify-center text-xl"
-            >
-              ×
-            </button>
+            <button onClick={() => { setSelectedPolygon(null); setAreaMenuPos(null) }} className="text-zinc-500 hover:text-zinc-300 leading-none ml-2 flex-shrink-0 w-5 h-5 flex items-center justify-center text-xl">×</button>
           </div>
-
           <div className="px-3 pt-2.5 pb-2 border-b border-zinc-800/60">
             <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">Set Status</div>
             <div className="grid grid-cols-2 gap-1">
@@ -790,18 +808,12 @@ export default function UrbexMap() {
                 <button
                   key={s.key}
                   onClick={() => {
-                    const updated = polygons.map((p) =>
-                      p.id === selectedPolygon.id ? { ...p, status: s.key } : p
-                    )
+                    const updated = polygons.map((p) => p.id === selectedPolygon.id ? { ...p, status: s.key } : p)
                     setPolygons(updated)
                     setSelectedPolygon(updated.find((p) => p.id === selectedPolygon.id)!)
                   }}
                   className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-[11px] transition-colors leading-tight"
-                  style={{
-                    background: selectedPolygon.status === s.key ? s.color + "25" : "transparent",
-                    color: s.color,
-                    border: `1px solid ${s.color}${selectedPolygon.status === s.key ? "70" : "28"}`,
-                  }}
+                  style={{ background: selectedPolygon.status === s.key ? s.color + "25" : "transparent", color: s.color, border: `1px solid ${s.color}${selectedPolygon.status === s.key ? "70" : "28"}` }}
                 >
                   <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: s.color }} />
                   <span className="truncate">{s.label}</span>
@@ -809,7 +821,6 @@ export default function UrbexMap() {
               ))}
             </div>
           </div>
-
           <div className="px-2 py-1.5 flex flex-col">
             {[
               { label: "Phantom", cb: () => showToast("Phantom pipeline not yet implemented") },
@@ -818,95 +829,43 @@ export default function UrbexMap() {
               { label: "Recon", cb: () => showToast("Recon not yet implemented") },
               { label: "Pipeline Launcher", cb: () => showToast("Pipeline Launcher not yet implemented") },
             ].map(({ label, cb }) => (
-              <button
-                key={label}
-                onClick={cb}
-                className="text-sm text-left px-3 py-2 rounded-lg text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 transition-colors"
-              >
-                {label}
-              </button>
+              <button key={label} onClick={cb} className="text-sm text-left px-3 py-2 rounded-lg text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 transition-colors">{label}</button>
             ))}
           </div>
         </div>
       )}
 
-      {/* ── Research Panel ────────────────────────────────────────────────── */}
+      {/* ── Research Panel ───────────────────────────────────────────────────── */}
       {selectedPolygon && researchOpen && (
         <div className="absolute top-4 right-4 z-30 w-80 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl overflow-hidden">
           <div className="flex items-center gap-2 px-4 py-3 border-b border-zinc-800">
-            <button
-              onClick={() => setResearchOpen(false)}
-              className="text-zinc-500 hover:text-zinc-300 text-sm leading-none flex-shrink-0"
-            >
-              ←
-            </button>
+            <button onClick={() => setResearchOpen(false)} className="text-zinc-500 hover:text-zinc-300 text-sm leading-none flex-shrink-0">←</button>
             <span className="text-sm font-semibold text-zinc-100">Research Panel</span>
-            <button
-              onClick={() => { setResearchOpen(false); setSelectedPolygon(null); setAreaMenuPos(null) }}
-              className="ml-auto text-zinc-500 hover:text-zinc-300 leading-none w-5 h-5 flex items-center justify-center text-xl"
-            >
-              ×
-            </button>
+            <button onClick={() => { setResearchOpen(false); setSelectedPolygon(null); setAreaMenuPos(null) }} className="ml-auto text-zinc-500 hover:text-zinc-300 leading-none w-5 h-5 flex items-center justify-center text-xl">×</button>
           </div>
-
           <div className="p-4 space-y-5 overflow-y-auto max-h-[calc(100vh-6rem)]">
             <div>
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs font-semibold text-zinc-300 uppercase tracking-wider">Contextual Search</span>
                 <label className="flex items-center gap-1.5 cursor-pointer">
                   <span className="text-[11px] text-zinc-500">Context</span>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={useCtx}
-                    onClick={() => setUseCtx((v) => !v)}
-                    className={`relative w-8 h-4 rounded-full transition-colors focus:outline-none ${useCtx ? "bg-blue-500" : "bg-zinc-600"}`}
-                  >
+                  <button type="button" role="switch" aria-checked={useCtx} onClick={() => setUseCtx((v) => !v)} className={`relative w-8 h-4 rounded-full transition-colors focus:outline-none ${useCtx ? "bg-blue-500" : "bg-zinc-600"}`}>
                     <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white shadow transition-transform ${useCtx ? "translate-x-4" : "translate-x-0.5"}`} />
                   </button>
                 </label>
               </div>
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault()
-                  const q = useCtx ? `${researchQuery} ${contextCoordString}` : researchQuery
-                  window.open(`https://www.google.com/search?q=${encodeURIComponent(q)}`, "_blank", "noopener,noreferrer")
-                }}
-                className="flex gap-2"
-              >
-                <input
-                  type="text"
-                  value={researchQuery}
-                  onChange={(e) => setResearchQuery(e.target.value)}
-                  placeholder={contextCoordString || "Search query…"}
-                  className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-500 transition-colors"
-                />
-                <button
-                  type="submit"
-                  className="bg-zinc-700 hover:bg-zinc-600 text-white text-xs px-3 py-1.5 rounded-lg transition-colors font-medium flex-shrink-0"
-                >
-                  Go
-                </button>
+              <form onSubmit={(e) => { e.preventDefault(); window.open(`https://www.google.com/search?q=${encodeURIComponent(useCtx ? `${researchQuery} ${contextCoordString}` : researchQuery)}`, "_blank", "noopener,noreferrer") }} className="flex gap-2">
+                <input type="text" value={researchQuery} onChange={(e) => setResearchQuery(e.target.value)} placeholder={contextCoordString || "Search query…"} className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-500 transition-colors" />
+                <button type="submit" className="bg-zinc-700 hover:bg-zinc-600 text-white text-xs px-3 py-1.5 rounded-lg transition-colors font-medium flex-shrink-0">Go</button>
               </form>
             </div>
-
             <div>
               <div className="text-xs font-semibold text-zinc-300 uppercase tracking-wider mb-2">Google Dork Helper</div>
               <div className="flex flex-col gap-1.5">
                 {DORKS.map(({ label, template }) => {
                   const q = template(contextCoordString || "location")
                   return (
-                    <button
-                      key={label}
-                      onClick={() =>
-                        window.open(
-                          `https://www.google.com/search?q=${encodeURIComponent(q)}`,
-                          "_blank",
-                          "noopener,noreferrer"
-                        )
-                      }
-                      className="text-left px-3 py-2 rounded-lg bg-zinc-800 border border-zinc-700/50 hover:border-zinc-600 hover:bg-zinc-700/80 transition-colors group"
-                    >
+                    <button key={label} onClick={() => window.open(`https://www.google.com/search?q=${encodeURIComponent(q)}`, "_blank", "noopener,noreferrer")} className="text-left px-3 py-2 rounded-lg bg-zinc-800 border border-zinc-700/50 hover:border-zinc-600 hover:bg-zinc-700/80 transition-colors group">
                       <div className="text-[10px] text-zinc-500 mb-0.5 group-hover:text-zinc-400 transition-colors uppercase tracking-wide">{label}</div>
                       <div className="text-xs text-zinc-300 font-mono break-all leading-snug">{q}</div>
                     </button>
@@ -918,7 +877,7 @@ export default function UrbexMap() {
         </div>
       )}
 
-      {/* ── Toast ─────────────────────────────────────────────────────────── */}
+      {/* ── Toast ───────────────────────────────────────────────────────────── */}
       {toast && (
         <div className="absolute bottom-14 left-1/2 -translate-x-1/2 z-50 pointer-events-none bg-zinc-800/95 backdrop-blur-sm border border-zinc-700 text-zinc-200 text-sm px-4 py-2.5 rounded-xl shadow-xl whitespace-nowrap">
           {toast}
@@ -926,6 +885,38 @@ export default function UrbexMap() {
       )}
 
       <span className="hidden">{checkpoints.length}</span>
+    </div>
+  )
+}
+
+// ─── Sub-components ────────────────────────────────────────────────────────────
+
+function OverlayToggle({
+  label,
+  description,
+  checked,
+  onChange,
+}: {
+  label: string
+  description?: string
+  checked: boolean
+  onChange: (v: boolean) => void
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 px-2 py-2 rounded-lg hover:bg-zinc-800/60 transition-colors">
+      <div className="min-w-0">
+        <div className="text-xs font-medium text-zinc-200 leading-tight">{label}</div>
+        {description && <div className="text-[10px] text-zinc-600 mt-0.5 leading-tight">{description}</div>}
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        onClick={() => onChange(!checked)}
+        className={`relative flex-shrink-0 w-9 h-5 rounded-full transition-colors focus:outline-none ${checked ? "bg-blue-500" : "bg-zinc-600"}`}
+      >
+        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${checked ? "translate-x-4" : "translate-x-0.5"}`} />
+      </button>
     </div>
   )
 }
@@ -943,6 +934,15 @@ function SearchIcon() {
     <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-500 flex-shrink-0">
       <circle cx="5.5" cy="5.5" r="4" />
       <line x1="8.5" y1="8.5" x2="12" y2="12" />
+    </svg>
+  )
+}
+
+function LayersIcon({ active }: { active: boolean }) {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" className={active ? "text-zinc-900" : "text-zinc-400"}>
+      <polygon points="6,1 11,4 6,7 1,4" />
+      <polyline points="1,7 6,10 11,7" />
     </svg>
   )
 }
