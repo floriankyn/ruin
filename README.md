@@ -10,7 +10,7 @@ A self-hosted urbex intelligence platform. Explore, document, and investigate ab
 ### Investigation
 Search-first intelligence gathering. A user inputs a name, entity, event, or place and the app automatically collects and correlates intelligence from open sources. Results are visualised as an interactive entity-relationship graph with a parallel timeline view. Cases are saved and enriched over time.
 
-→ [Full spec](investigation.md)
+→ [Full spec](documentation/investigation.md)
 
 ### Urbex
 A Google Earth-style map module for discovering, documenting, and investigating urban exploration locations. The map is the primary interface — users roam freely, right-click to set checkpoint statuses, draw polygons around sites, and trigger tools directly from the map. Supports full Google Earth feature parity, a rich thematic layer catalogue from open data sources, and a standardised geospatial pipeline. Locations can be escalated into Phantom reports or full OSINT investigations.
