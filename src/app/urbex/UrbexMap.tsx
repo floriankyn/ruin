@@ -239,6 +239,8 @@ const STATUSES: { key: StatusKey; label: string; color: string }[] = [
   { key: "needs-more-research", label: "Needs More Research", color: "#a855f7" },
 ]
 
+type RegionFilter = "all" | "fr" | "uk"
+
 const STANDARD_LAYERS: { key: BaseLayer; label: string }[] = [
   { key: "dark", label: "Dark" },
   { key: "street", label: "Street (OSM)" },
@@ -257,13 +259,13 @@ const ESRI_LAYERS: { key: BaseLayer; label: string }[] = [
   { key: "esri-dark-gray",    label: "Dark Gray" },
 ]
 
-const HISTORICAL_LAYERS: { key: BaseLayer; label: string; note: string }[] = [
-  { key: "ign-cassini",       label: "Cassini",          note: "FR · 18th c." },
-  { key: "ign-etatmajor",     label: "État-Major",       note: "FR · 1820–1866" },
-  { key: "nls-os6inch",       label: "OS 6-inch",        note: "UK · 2nd ed." },
-  { key: "nls-os1inch",       label: "OS 1-inch",        note: "UK · 1840s–1900s" },
-  { key: "openhistoricalmap", label: "Bartholomew",      note: "Global · c.1880–1920" },
-  { key: "usgs-topo",         label: "USGS Topo",        note: "US · national map" },
+const HISTORICAL_LAYERS: { key: BaseLayer; label: string; note: string; regions: RegionFilter[] }[] = [
+  { key: "ign-cassini",       label: "Cassini",     note: "FR · 18th c.",        regions: ["all", "fr"] },
+  { key: "ign-etatmajor",     label: "État-Major",  note: "FR · 1820–1866",      regions: ["all", "fr"] },
+  { key: "nls-os6inch",       label: "OS 6-inch",   note: "UK · 2nd ed.",        regions: ["all", "uk"] },
+  { key: "nls-os1inch",       label: "OS 1-inch",   note: "UK · 1840s–1900s",    regions: ["all", "uk"] },
+  { key: "openhistoricalmap", label: "Bartholomew", note: "Global · c.1880–1920", regions: ["all", "uk"] },
+  { key: "usgs-topo",         label: "USGS Topo",   note: "US · national map",   regions: ["all"] },
 ]
 
 const DORKS: { label: string; template: (loc: string) => string }[] = [
@@ -405,16 +407,150 @@ function removeLabelsOverlay(map: maplibregl.Map) {
   if (map.getSource("labels-raster")) map.removeSource("labels-raster")
 }
 
+// Night lights — NASA GIBS VIIRS SNPP Day/Night Band ENCC, 2023 annual composite
+const GIBS = "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best"
+const GIBS_WMS = "https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi"
+
+function addNightLightsOverlay(map: maplibregl.Map) {
+  if (map.getSource("nightlights-raster")) return
+  map.addSource("nightlights-raster", {
+    type: "raster",
+    tiles: [`${GIBS}/VIIRS_SNPP_DayNightBand_ENCC/default/2023-01-01/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png`],
+    tileSize: 256, attribution: "© NASA GIBS / VIIRS SNPP", maxzoom: 8,
+  })
+  map.addLayer(
+    { id: "nightlights-overlay", type: "raster", source: "nightlights-raster",
+      paint: { "raster-opacity": 0.85 } },
+    firstExistingLayer(map, "streetview-overlay", "cadastre-overlay", "buildings-fill", "labels-overlay")
+  )
+}
+function removeNightLightsOverlay(map: maplibregl.Map) {
+  if (map.getLayer("nightlights-overlay")) map.removeLayer("nightlights-overlay")
+  if (map.getSource("nightlights-raster")) map.removeSource("nightlights-raster")
+}
+
+// Active wildfires — NASA GIBS MODIS Combined Thermal Anomalies via WMS (today's date)
+function addFiresOverlay(map: maplibregl.Map) {
+  if (map.getSource("fires-raster")) return
+  const date = new Date().toISOString().slice(0, 10)
+  map.addSource("fires-raster", {
+    type: "raster",
+    tiles: [`${GIBS_WMS}?SERVICE=WMS&REQUEST=GetMap&VERSION=1.1.1&LAYERS=MODIS_Combined_Thermal_Anomalies_All&BBOX={bbox-epsg-3857}&WIDTH=256&HEIGHT=256&SRS=EPSG:3857&FORMAT=image/png&TRANSPARENT=TRUE&TIME=${date}`],
+    tileSize: 256, attribution: "© NASA GIBS / MODIS",
+  })
+  map.addLayer(
+    { id: "fires-overlay", type: "raster", source: "fires-raster",
+      paint: { "raster-opacity": 0.9 } },
+    firstExistingLayer(map, "labels-overlay")
+  )
+}
+function removeFiresOverlay(map: maplibregl.Map) {
+  if (map.getLayer("fires-overlay")) map.removeLayer("fires-overlay")
+  if (map.getSource("fires-raster")) map.removeSource("fires-raster")
+}
+
+// Flood extent — NASA GIBS VIIRS Combined Flood 3-Day (today's date)
+function addFloodsOverlay(map: maplibregl.Map) {
+  if (map.getSource("floods-raster")) return
+  const date = new Date().toISOString().slice(0, 10)
+  map.addSource("floods-raster", {
+    type: "raster",
+    tiles: [`${GIBS}/VIIRS_Combined_Flood_3-Day/default/${date}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.png`],
+    tileSize: 256, attribution: "© NASA GIBS / VIIRS Flood", maxzoom: 9,
+  })
+  map.addLayer(
+    { id: "floods-overlay", type: "raster", source: "floods-raster",
+      paint: { "raster-opacity": 0.75 } },
+    firstExistingLayer(map, "fires-overlay", "labels-overlay")
+  )
+}
+function removeFloodsOverlay(map: maplibregl.Map) {
+  if (map.getLayer("floods-overlay")) map.removeLayer("floods-overlay")
+  if (map.getSource("floods-raster")) map.removeSource("floods-raster")
+}
+
+// Permanent water bodies — JRC Global Surface Water 2021 occurrence tiles
+function addWaterOverlay(map: maplibregl.Map) {
+  if (map.getSource("water-jrc-raster")) return
+  map.addSource("water-jrc-raster", {
+    type: "raster",
+    tiles: ["https://storage.googleapis.com/global-surface-water/tiles2021/occurrence/{z}/{x}/{y}.png"],
+    tileSize: 256, attribution: "© JRC / Global Surface Water", maxzoom: 13,
+  })
+  map.addLayer(
+    { id: "water-jrc-overlay", type: "raster", source: "water-jrc-raster",
+      paint: { "raster-opacity": 0.7 } },
+    firstExistingLayer(map, "streetview-overlay", "cadastre-overlay", "buildings-fill", "labels-overlay")
+  )
+}
+function removeWaterOverlay(map: maplibregl.Map) {
+  if (map.getLayer("water-jrc-overlay")) map.removeLayer("water-jrc-overlay")
+  if (map.getSource("water-jrc-raster")) map.removeSource("water-jrc-raster")
+}
+
+// Tree cover & forest loss — Global Forest Watch Hansen/UMD dataset
+function addForestOverlay(map: maplibregl.Map) {
+  if (map.getSource("forest-raster")) return
+  map.addSource("forest-raster", {
+    type: "raster",
+    tiles: ["https://tiles.globalforestwatch.org/umd_tree_cover_loss/v1.8/tcd_30/{z}/{x}/{y}.png"],
+    tileSize: 256, attribution: "© Global Forest Watch / Hansen·UMD", maxzoom: 12,
+  })
+  map.addLayer(
+    { id: "forest-overlay", type: "raster", source: "forest-raster",
+      paint: { "raster-opacity": 0.7 } },
+    firstExistingLayer(map, "streetview-overlay", "cadastre-overlay", "buildings-fill", "labels-overlay")
+  )
+}
+function removeForestOverlay(map: maplibregl.Map) {
+  if (map.getLayer("forest-overlay")) map.removeLayer("forest-overlay")
+  if (map.getSource("forest-raster")) map.removeSource("forest-raster")
+}
+
+// OSM infrastructure — industrial zones, military areas (OpenFreeMap planet vector tiles)
+const INFRA_LAYERS = ["infra-industrial-fill","infra-industrial-line","infra-military-fill","infra-military-line","infra-aerodrome-fill"] as const
+function addInfraOverlay(map: maplibregl.Map) {
+  if (map.getSource("infra-vector")) return
+  map.addSource("infra-vector", { type: "vector", url: "https://tiles.openfreemap.org/planet" })
+  const before = firstExistingLayer(map, "labels-overlay")
+  map.addLayer({ id: "infra-industrial-fill", type: "fill", source: "infra-vector", "source-layer": "landuse",
+    filter: ["==", ["get", "class"], "industrial"], minzoom: 8,
+    paint: { "fill-color": "rgba(255,140,0,0.22)" } }, before)
+  map.addLayer({ id: "infra-industrial-line", type: "line", source: "infra-vector", "source-layer": "landuse",
+    filter: ["==", ["get", "class"], "industrial"], minzoom: 8,
+    paint: { "line-color": "rgba(255,165,40,0.85)", "line-width": 1 } }, before)
+  map.addLayer({ id: "infra-military-fill", type: "fill", source: "infra-vector", "source-layer": "landuse",
+    filter: ["==", ["get", "class"], "military"], minzoom: 6,
+    paint: { "fill-color": "rgba(200,30,30,0.22)" } }, before)
+  map.addLayer({ id: "infra-military-line", type: "line", source: "infra-vector", "source-layer": "landuse",
+    filter: ["==", ["get", "class"], "military"], minzoom: 6,
+    paint: { "line-color": "rgba(220,50,50,0.85)", "line-width": 1.5, "line-dasharray": [4, 2] } }, before)
+  map.addLayer({ id: "infra-aerodrome-fill", type: "fill", source: "infra-vector", "source-layer": "landuse",
+    filter: ["==", ["get", "class"], "aerodrome"], minzoom: 6,
+    paint: { "fill-color": "rgba(80,160,255,0.22)" } }, before)
+}
+function removeInfraOverlay(map: maplibregl.Map) {
+  for (const id of INFRA_LAYERS) { if (map.getLayer(id)) map.removeLayer(id) }
+  if (map.getSource("infra-vector")) map.removeSource("infra-vector")
+}
+
 // Z-order: hillshade → SV coverage → cadastre → buildings → labels → draw
 function applyActiveOverlays(
   map: maplibregl.Map,
-  terrain: boolean, streetview: boolean, cadastre: boolean, buildings: boolean, labels: boolean
+  terrain: boolean, streetview: boolean, cadastre: boolean, buildings: boolean, labels: boolean,
+  nightLights: boolean, fires: boolean, floods: boolean, water: boolean, forest: boolean, infra: boolean
 ) {
   if (terrain) addTerrainOverlay(map)
   if (streetview) addStreetViewOverlay(map)
   if (cadastre) addCadastreOverlay(map)
   if (buildings) addBuildingsOverlay(map)
   if (labels) addLabelsOverlay(map)
+  if (nightLights) addNightLightsOverlay(map)
+  if (fires) addFiresOverlay(map)
+  if (floods) addFloodsOverlay(map)
+  if (water) addWaterOverlay(map)
+  if (forest) addForestOverlay(map)
+  if (infra) addInfraOverlay(map)
 }
 
 // ─── Misc helpers ──────────────────────────────────────────────────────────────
@@ -456,6 +592,12 @@ export default function UrbexMap() {
   const cadastreRef = useRef(false)
   const buildingsRef = useRef(false)
   const labelsRef = useRef(false)
+  const nightLightsRef = useRef(false)
+  const firesRef = useRef(false)
+  const floodsRef = useRef(false)
+  const waterRef = useRef(false)
+  const forestRef = useRef(false)
+  const infraRef = useRef(false)
   const streetViewModeRef = useRef(false)
   const globeModeRef = useRef(false)
   const filteredVersionsRef = useRef<WaybackVersion[]>([])
@@ -487,7 +629,14 @@ export default function UrbexMap() {
   const [cadastreOverlay, setCadastreOverlay] = useState(false)
   const [buildingsOverlay, setBuildingsOverlay] = useState(false)
   const [labelsOverlay, setLabelsOverlay] = useState(false)
+  const [nightLightsOverlay, setNightLightsOverlay] = useState(false)
+  const [firesOverlay, setFiresOverlay] = useState(false)
+  const [floodsOverlay, setFloodsOverlay] = useState(false)
+  const [waterOverlay, setWaterOverlay] = useState(false)
+  const [forestOverlay, setForestOverlay] = useState(false)
+  const [infraOverlay, setInfraOverlay] = useState(false)
   const [overlaysOpen, setOverlaysOpen] = useState(false)
+  const [regionFilter, setRegionFilter] = useState<RegionFilter>("all")
   const [streetViewMode, setStreetViewMode] = useState(false)
   const [globeMode, setGlobeMode] = useState(false)
   const [cadastreCard, setCadastreCard] = useState<CadastreCard | null>(null)
@@ -583,7 +732,7 @@ export default function UrbexMap() {
     map.once("load", () => {
       if (!mapRef.current) return
       map.resize()
-      applyActiveOverlays(map, terrainRef.current, streetViewRef.current, cadastreRef.current, buildingsRef.current, labelsRef.current)
+      applyActiveOverlays(map, terrainRef.current, streetViewRef.current, cadastreRef.current, buildingsRef.current, labelsRef.current, nightLightsRef.current, firesRef.current, floodsRef.current, waterRef.current, forestRef.current, infraRef.current)
       const draw = new MapboxDraw({ displayControlsDefault: false, controls: {}, defaultMode: "simple_select", styles: DRAW_STYLES })
       map.addControl(draw as unknown as maplibregl.IControl)
       drawRef.current = draw
@@ -642,7 +791,7 @@ export default function UrbexMap() {
         // Re-check availability for the current view when returning to satellite
         if (waybackVersionsRef.current.length > 0) checkWaybackAvailability()
       }
-      applyActiveOverlays(map, terrainRef.current, streetViewRef.current, cadastreRef.current, buildingsRef.current, labelsRef.current)
+      applyActiveOverlays(map, terrainRef.current, streetViewRef.current, cadastreRef.current, buildingsRef.current, labelsRef.current, nightLightsRef.current, firesRef.current, floodsRef.current, waterRef.current, forestRef.current, infraRef.current)
       if (globeModeRef.current) {
         map.setProjection({ type: "globe" })
         map.setSky({ "sky-color": "#0d1f4a", "horizon-color": "#b0d0f0", "atmosphere-blend": 0.85 })
@@ -726,6 +875,50 @@ export default function UrbexMap() {
     const map = mapRef.current; if (!map || !map.isStyleLoaded()) return
     labelsOverlay ? addLabelsOverlay(map) : removeLabelsOverlay(map)
   }, [labelsOverlay])
+
+  useEffect(() => {
+    nightLightsRef.current = nightLightsOverlay
+    const map = mapRef.current; if (!map || !map.isStyleLoaded()) return
+    nightLightsOverlay ? addNightLightsOverlay(map) : removeNightLightsOverlay(map)
+  }, [nightLightsOverlay])
+
+  useEffect(() => {
+    firesRef.current = firesOverlay
+    const map = mapRef.current; if (!map || !map.isStyleLoaded()) return
+    firesOverlay ? addFiresOverlay(map) : removeFiresOverlay(map)
+  }, [firesOverlay])
+
+  useEffect(() => {
+    floodsRef.current = floodsOverlay
+    const map = mapRef.current; if (!map || !map.isStyleLoaded()) return
+    floodsOverlay ? addFloodsOverlay(map) : removeFloodsOverlay(map)
+  }, [floodsOverlay])
+
+  useEffect(() => {
+    waterRef.current = waterOverlay
+    const map = mapRef.current; if (!map || !map.isStyleLoaded()) return
+    waterOverlay ? addWaterOverlay(map) : removeWaterOverlay(map)
+  }, [waterOverlay])
+
+  useEffect(() => {
+    forestRef.current = forestOverlay
+    const map = mapRef.current; if (!map || !map.isStyleLoaded()) return
+    forestOverlay ? addForestOverlay(map) : removeForestOverlay(map)
+  }, [forestOverlay])
+
+  useEffect(() => {
+    infraRef.current = infraOverlay
+    const map = mapRef.current; if (!map || !map.isStyleLoaded()) return
+    infraOverlay ? addInfraOverlay(map) : removeInfraOverlay(map)
+  }, [infraOverlay])
+
+  // If the active historical layer is filtered out by the region selector, fall back to dark
+  useEffect(() => {
+    const isHistorical = HISTORICAL_LAYERS.some(l => l.key === baseLayer)
+    if (!isHistorical) return
+    const visible = HISTORICAL_LAYERS.filter(l => l.regions.includes(regionFilter))
+    if (!visible.some(l => l.key === baseLayer)) setBaseLayer("dark")
+  }, [regionFilter, baseLayer])
 
   useEffect(() => {
     streetViewModeRef.current = streetViewMode
@@ -825,7 +1018,8 @@ export default function UrbexMap() {
       })
   }, [])
 
-  const anyOverlayActive = terrainOverlay || streetViewOverlay || cadastreOverlay || buildingsOverlay || labelsOverlay
+  const allOverlays = [terrainOverlay, streetViewOverlay, cadastreOverlay, buildingsOverlay, labelsOverlay, nightLightsOverlay, firesOverlay, floodsOverlay, waterOverlay, forestOverlay, infraOverlay]
+  const anyOverlayActive = allOverlays.some(Boolean)
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -834,7 +1028,7 @@ export default function UrbexMap() {
 
       {/* ── Search + Draw — top left ────────────────────────────────────────── */}
       <div className="absolute top-4 left-4 z-20 flex flex-col gap-2">
-        <div className="relative">
+        <div className="relative z-10">
           <div className="flex items-center gap-2 bg-zinc-900/90 backdrop-blur-sm border border-zinc-700/60 rounded-lg px-3 py-2 shadow-lg w-64">
             <SearchIcon />
             <input
@@ -887,9 +1081,71 @@ export default function UrbexMap() {
       </div>
 
       {/* ── Layer switcher + Overlays — top right ───────────────────────────── */}
-      <div className="absolute top-4 right-4 z-20 flex flex-col gap-2 items-end">
-        {/* Layer picker */}
-        <div className="bg-zinc-900/90 backdrop-blur-sm border border-zinc-700/60 rounded-xl shadow-lg overflow-hidden w-44">
+      <div className="absolute top-4 right-4 z-20 flex flex-row gap-2 items-start">
+
+        {/* Overlays column — left of layer picker */}
+        <div className="flex flex-col gap-2 items-end">
+          {/* Overlays toggle */}
+          <button onClick={() => setOverlaysOpen((v) => !v)}
+            className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border shadow transition-colors whitespace-nowrap ${
+              overlaysOpen || anyOverlayActive
+                ? "bg-zinc-100 text-zinc-900 border-zinc-300 font-semibold"
+                : "bg-zinc-900/90 backdrop-blur-sm text-zinc-400 border-zinc-700/60 hover:text-zinc-200 hover:bg-zinc-800"
+            }`}>
+            <LayersIcon active={overlaysOpen || anyOverlayActive} />
+            Overlays
+            {anyOverlayActive && (
+              <span className="ml-0.5 bg-blue-500 text-white text-[9px] font-bold px-1 py-0.5 rounded leading-none">
+                {allOverlays.filter(Boolean).length}
+              </span>
+            )}
+            <span className="opacity-40 text-[10px]">{overlaysOpen ? "▲" : "▼"}</span>
+          </button>
+
+          {/* Overlays panel */}
+          {overlaysOpen && (
+            <div className="bg-zinc-900/95 backdrop-blur-sm border border-zinc-700/60 rounded-xl shadow-2xl w-64 max-h-[80vh] flex flex-col">
+              <div className="px-3 py-2 border-b border-zinc-800 flex-shrink-0">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Map Overlays</span>
+              </div>
+              <div className="overflow-y-auto flex-1 p-2 flex flex-col gap-0.5">
+
+                {/* Base */}
+                <div className="text-[9px] uppercase tracking-widest font-semibold text-zinc-600 px-2 pt-1 pb-0.5">Base</div>
+                <OverlayToggle label="Labels"    dot="#a0a0a0" description="City, street & place names"        checked={labelsOverlay}    onChange={setLabelsOverlay} />
+                <OverlayToggle label="Buildings" dot="#ffd700" description="OSM footprints · zoom 13+"         checked={buildingsOverlay} onChange={setBuildingsOverlay} />
+                <OverlayToggle label="Terrain"   dot="#8d6e63" description="3D elevation · right-drag to tilt" checked={terrainOverlay}   onChange={setTerrainOverlay} />
+
+                <div className="border-t border-zinc-800 my-1 mx-1" />
+
+                {/* Location */}
+                <div className="text-[9px] uppercase tracking-widest font-semibold text-zinc-600 px-2 pb-0.5">Location</div>
+                <OverlayToggle label="Cadastre"    dot="#e91e63" description="IGN parcel boundaries · FR · zoom 12+" checked={cadastreOverlay}    onChange={setCadastreOverlay} />
+                <OverlayToggle label="Street View" dot="#4285f4" description="Google SV coverage lines"              checked={streetViewOverlay} onChange={setStreetViewOverlay} />
+
+                <div className="border-t border-zinc-800 my-1 mx-1" />
+
+                {/* Environment */}
+                <div className="text-[9px] uppercase tracking-widest font-semibold text-zinc-600 px-2 pb-0.5">Environment</div>
+                <OverlayToggle label="Night Lights"       dot="#f5d060" description="NASA VIIRS · 2023 composite"         checked={nightLightsOverlay} onChange={setNightLightsOverlay} />
+                <OverlayToggle label="Active Fires"       dot="#ff5722" description="NASA MODIS thermal anomalies"        checked={firesOverlay}       onChange={setFiresOverlay}       live />
+                <OverlayToggle label="Flood Extent"       dot="#1e88e5" description="NASA VIIRS · 3-day composite"        checked={floodsOverlay}      onChange={setFloodsOverlay}      live />
+                <OverlayToggle label="Water Bodies"       dot="#00bcd4" description="JRC permanent surface water 2021"   checked={waterOverlay}       onChange={setWaterOverlay} />
+                <OverlayToggle label="Forest Cover"       dot="#4caf50" description="GFW tree cover loss · 2001–present" checked={forestOverlay}      onChange={setForestOverlay} />
+
+                <div className="border-t border-zinc-800 my-1 mx-1" />
+
+                {/* Infrastructure */}
+                <div className="text-[9px] uppercase tracking-widest font-semibold text-zinc-600 px-2 pb-0.5">Infrastructure</div>
+                <OverlayToggle label="Industrial & Military" dot="#ff9800" description="OSM · zones + aerodromes · zoom 6+" checked={infraOverlay} onChange={setInfraOverlay} />
+
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Layer picker column — right */}
+        <div className="bg-zinc-900/90 backdrop-blur-sm border border-zinc-700/60 rounded-xl shadow-lg overflow-hidden w-48">
           {/* Standard group */}
           <div className="px-2 pt-2 pb-1.5">
             <div className="text-[9px] uppercase tracking-widest font-semibold text-zinc-600 px-1.5 mb-1">Standard</div>
@@ -906,54 +1162,37 @@ export default function UrbexMap() {
             ))}
           </div>
           <div className="border-t border-zinc-800" />
-          {/* Historical group */}
-          <div className="px-2 pt-2 pb-2 max-h-52 overflow-y-auto">
-            <div className="text-[9px] uppercase tracking-widest font-semibold text-zinc-600 px-1.5 mb-1">Historical</div>
-            {HISTORICAL_LAYERS.map(({ key, label, note }) => (
-              <button
-                key={key}
-                onClick={() => setBaseLayer(key)}
-                className={`w-full text-left px-2 py-1.5 rounded-lg transition-colors ${
-                  baseLayer === key ? "bg-amber-900/60 text-amber-200 font-semibold" : "text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
-                }`}
-              >
-                <div className="text-xs leading-tight">{label}</div>
-                <div className="text-[9px] text-zinc-600 leading-tight mt-0.5">{note}</div>
-              </button>
-            ))}
+          {/* Historical group with region filter */}
+          <div className="px-2 pt-2 pb-2">
+            <div className="flex items-center justify-between mb-1.5 px-1.5">
+              <span className="text-[9px] uppercase tracking-widest font-semibold text-zinc-600">Historical</span>
+              <div className="flex items-center bg-zinc-800 rounded-md p-0.5 gap-0.5">
+                {(["all", "fr", "uk"] as const).map(r => (
+                  <button key={r} onClick={() => setRegionFilter(r)}
+                    className={`text-[9px] px-1.5 py-0.5 rounded transition-colors font-medium leading-none ${
+                      regionFilter === r ? "bg-zinc-600 text-zinc-100" : "text-zinc-500 hover:text-zinc-300"
+                    }`}>
+                    {r === "all" ? "ALL" : r.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="max-h-52 overflow-y-auto flex flex-col gap-0.5">
+              {HISTORICAL_LAYERS.filter(l => l.regions.includes(regionFilter)).map(({ key, label, note }) => (
+                <button key={key} onClick={() => setBaseLayer(key)}
+                  className={`w-full text-left px-2 py-1.5 rounded-lg transition-colors ${
+                    baseLayer === key
+                      ? "bg-amber-900/60 text-amber-200 font-semibold"
+                      : "text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
+                  }`}>
+                  <div className="text-xs leading-tight">{label}</div>
+                  <div className="text-[9px] text-zinc-600 leading-tight mt-0.5">{note}</div>
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
-        {/* Overlays toggle */}
-        <button
-          onClick={() => setOverlaysOpen((v) => !v)}
-          className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border shadow transition-colors ${
-            overlaysOpen || anyOverlayActive
-              ? "bg-zinc-100 text-zinc-900 border-zinc-300 font-semibold"
-              : "bg-zinc-900/90 backdrop-blur-sm text-zinc-400 border-zinc-700/60 hover:text-zinc-200 hover:bg-zinc-800"
-          }`}
-        >
-          <LayersIcon active={overlaysOpen || anyOverlayActive} />
-          Overlays
-          {anyOverlayActive && <span className="ml-0.5 text-[10px] opacity-70">{[terrainOverlay, streetViewOverlay, cadastreOverlay, buildingsOverlay, labelsOverlay].filter(Boolean).length}</span>}
-          <span className="ml-0.5 opacity-50 text-[10px]">{overlaysOpen ? "▲" : "▼"}</span>
-        </button>
-
-        {/* Overlays panel */}
-        {overlaysOpen && (
-          <div className="bg-zinc-900/95 backdrop-blur-sm border border-zinc-700/60 rounded-xl shadow-2xl overflow-hidden w-56">
-            <div className="px-3 py-2 border-b border-zinc-800">
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Map Overlays</span>
-            </div>
-            <div className="p-2 flex flex-col gap-0.5">
-              <OverlayToggle label="Labels" description="City, street & place names" checked={labelsOverlay} onChange={setLabelsOverlay} />
-              <OverlayToggle label="Buildings" description="OSM building footprints" checked={buildingsOverlay} onChange={setBuildingsOverlay} />
-              <OverlayToggle label="Cadastre (France)" description="IGN parcel boundaries · zoom 12+" checked={cadastreOverlay} onChange={setCadastreOverlay} />
-              <OverlayToggle label="Street View coverage" description="Google SV blue lines" checked={streetViewOverlay} onChange={setStreetViewOverlay} />
-              <OverlayToggle label="Terrain & Hillshade" description="3D elevation · right-drag to tilt" checked={terrainOverlay} onChange={setTerrainOverlay} />
-            </div>
-          </div>
-        )}
       </div>
 
       {/* ── Coord readout ─────────────────────────────────────────────────────── */}
@@ -1311,17 +1550,30 @@ function LayerButton({ active, onClick, children }: { active: boolean; onClick: 
   )
 }
 
-function OverlayToggle({ label, description, checked, onChange }: { label: string; description?: string; checked: boolean; onChange: (v: boolean) => void }) {
+function OverlayToggle({ label, description, checked, onChange, dot, live }: {
+  label: string; description?: string; checked: boolean; onChange: (v: boolean) => void
+  dot?: string   // CSS color for indicator dot
+  live?: boolean // show "LIVE" badge (NRT data)
+}) {
   return (
-    <div className="flex items-center justify-between gap-3 px-2 py-2 rounded-lg hover:bg-zinc-800/60 transition-colors">
-      <div className="min-w-0">
-        <div className="text-xs font-medium text-zinc-200 leading-tight">{label}</div>
-        {description && <div className="text-[10px] text-zinc-600 mt-0.5 leading-tight">{description}</div>}
+    <div className={`flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg transition-colors cursor-pointer ${checked ? "bg-zinc-800/80" : "hover:bg-zinc-800/40"}`}
+      onClick={() => onChange(!checked)}>
+      <div className="flex items-center gap-2 min-w-0">
+        {dot && (
+          <span className="flex-shrink-0 w-2 h-2 rounded-full" style={{ background: dot, opacity: checked ? 1 : 0.4 }} />
+        )}
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5">
+            <span className={`text-xs font-medium leading-tight ${checked ? "text-zinc-100" : "text-zinc-400"}`}>{label}</span>
+            {live && <span className="text-[8px] font-bold tracking-wide text-amber-500 leading-none">LIVE</span>}
+          </div>
+          {description && <div className="text-[10px] text-zinc-600 mt-0.5 leading-tight">{description}</div>}
+        </div>
       </div>
-      <button type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)}
-        className={`relative flex-shrink-0 w-9 h-5 rounded-full transition-colors focus:outline-none ${checked ? "bg-blue-500" : "bg-zinc-600"}`}>
-        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${checked ? "translate-x-4" : "translate-x-0.5"}`} />
-      </button>
+      <div role="switch" aria-checked={checked}
+        className={`relative flex-shrink-0 w-8 h-4 rounded-full transition-colors pointer-events-none ${checked ? "bg-blue-500" : "bg-zinc-700"}`}>
+        <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white shadow transition-transform ${checked ? "translate-x-4" : "translate-x-0.5"}`} />
+      </div>
     </div>
   )
 }
