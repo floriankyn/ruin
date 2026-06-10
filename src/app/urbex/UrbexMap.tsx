@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef, useState, useCallback } from "react"
+import { useEffect, useRef, useState, useCallback, type ReactNode } from "react"
 import maplibregl, { type StyleSpecification } from "maplibre-gl"
 // @ts-ignore — @mapbox/mapbox-gl-draw ships no types; @types/mapbox__mapbox-gl-draw references mapbox-gl
 import MapboxDraw from "@mapbox/mapbox-gl-draw"
@@ -35,6 +35,8 @@ interface Checkpoint {
   label: string
   notes: string
   timestamp: Date
+  tags: string[]
+  customColor?: string
 }
 
 interface DrawnPolygon {
@@ -43,6 +45,25 @@ interface DrawnPolygon {
   label: string
   status: StatusKey | null
   timestamp: Date
+  tags: string[]
+}
+
+type ToolMode = "off" | "distance" | "area" | "radius" | "placemark" | "draw-polygon"
+
+interface SavedMeasurement {
+  id: string
+  type: "distance" | "area" | "radius"
+  points: [number, number][]
+  value: number
+  label: string
+  tags: string[]
+  timestamp: Date
+}
+
+interface CheckpointDialogState {
+  lngLat: { lng: number; lat: number }
+  status: StatusKey
+  screen: { x: number; y: number }
 }
 
 interface ContextMenuState {
@@ -572,6 +593,203 @@ function makeMarkerEl(color: string): HTMLDivElement {
 
 function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, v)) }
 
+// ─── Measurement helpers ───────────────────────────────────────────────────────
+
+function segmentDist(p1: [number, number], p2: [number, number]): number {
+  return new maplibregl.LngLat(p1[0], p1[1]).distanceTo(new maplibregl.LngLat(p2[0], p2[1]))
+}
+
+function pathLength(pts: [number, number][]): number {
+  let d = 0
+  for (let i = 0; i < pts.length - 1; i++) d += segmentDist(pts[i], pts[i + 1])
+  return d
+}
+
+// Spherical shoelace (Girard's theorem approximation) — adequate for <500 km² areas
+function sphericalArea(pts: [number, number][]): number {
+  if (pts.length < 3) return 0
+  const R = 6371000
+  let area = 0
+  const n = pts.length
+  for (let i = 0; i < n; i++) {
+    const [lng1, lat1] = pts[i]
+    const [lng2, lat2] = pts[(i + 1) % n]
+    area += (lng2 - lng1) * (Math.PI / 180) *
+      (2 + Math.sin(lat1 * Math.PI / 180) + Math.sin(lat2 * Math.PI / 180))
+  }
+  return Math.abs(area * R * R / 2)
+}
+
+function circleRing(center: [number, number], radiusM: number, n = 64): [number, number][] {
+  const R = 6371000
+  const [lng0, lat0] = center
+  const lat0r = lat0 * Math.PI / 180
+  const ring: [number, number][] = []
+  for (let i = 0; i <= n; i++) {
+    const angle = (i / n) * 2 * Math.PI
+    const dLat = (radiusM / R) * Math.cos(angle)
+    const dLng = (radiusM / R) * Math.sin(angle) / Math.cos(lat0r)
+    ring.push([lng0 + dLng * 180 / Math.PI, lat0 + dLat * 180 / Math.PI])
+  }
+  return ring
+}
+
+function fmtDist(m: number): string {
+  if (m >= 1000) return `${(m / 1000).toFixed(2)} km`
+  return `${Math.round(m)} m`
+}
+
+function fmtMeasureArea(m2: number): string {
+  if (m2 >= 1_000_000) return `${(m2 / 1_000_000).toFixed(2)} km²`
+  if (m2 >= 10_000) return `${(m2 / 10_000).toFixed(2)} ha`
+  return `${Math.round(m2)} m²`
+}
+
+// ─── Persistent user-data layers (polygons + saved measurements) ──────────────
+
+const USER_POLY_SOURCE  = "user-polygons"
+const SAVED_MEAS_SOURCE = "saved-measures"
+
+function initUserLayers(map: maplibregl.Map) {
+  if (!map.getSource(USER_POLY_SOURCE)) {
+    map.addSource(USER_POLY_SOURCE, { type: "geojson", data: { type: "FeatureCollection", features: [] } })
+    map.addLayer({ id: "user-poly-fill", type: "fill", source: USER_POLY_SOURCE,
+      paint: { "fill-color": ["coalesce", ["get", "fillColor"], "#3bb2d0"], "fill-opacity": 0.18 } })
+    map.addLayer({ id: "user-poly-outline", type: "line", source: USER_POLY_SOURCE,
+      paint: { "line-color": ["coalesce", ["get", "strokeColor"], "#3bb2d0"], "line-width": 2 } })
+  }
+  if (!map.getSource(SAVED_MEAS_SOURCE)) {
+    map.addSource(SAVED_MEAS_SOURCE, { type: "geojson", data: { type: "FeatureCollection", features: [] } })
+    map.addLayer({ id: "saved-meas-fill", type: "fill", source: SAVED_MEAS_SOURCE,
+      filter: ["match", ["get", "t"], ["area-fill", "radius-fill"], true, false],
+      paint: { "fill-color": "#38bdf8", "fill-opacity": 0.12 } })
+    map.addLayer({ id: "saved-meas-line", type: "line", source: SAVED_MEAS_SOURCE,
+      filter: ["match", ["get", "t"], ["line", "area-outline", "radius-outline", "radius-spoke"], true, false],
+      paint: { "line-color": "#38bdf8", "line-width": 1.5, "line-dasharray": [4, 2] } })
+  }
+}
+
+function updateUserPolygons(map: maplibregl.Map, polygons: DrawnPolygon[]) {
+  const src = map.getSource(USER_POLY_SOURCE) as maplibregl.GeoJSONSource | undefined
+  if (!src) return
+  src.setData({
+    type: "FeatureCollection",
+    features: polygons.map(p => {
+      const statusColors: Record<string, string> = {
+        "worth-exploring": "#22c55e", "not-interesting": "#71717a", "inaccessible": "#ef4444",
+        "demolished": "#f97316", "visited": "#3b82f6", "needs-more-research": "#a855f7",
+      }
+      const base = p.status ? (statusColors[p.status] ?? "#3bb2d0") : "#3bb2d0"
+      return {
+        type: "Feature" as const,
+        id: p.id,
+        geometry: p.geometry,
+        properties: { polyId: p.id, fillColor: base, strokeColor: base },
+      }
+    }),
+  })
+}
+
+function buildSavedMeasureFeatures(measurements: SavedMeasurement[]): GeoJSON.Feature[] {
+  const out: GeoJSON.Feature[] = []
+  for (const m of measurements) {
+    const pts = m.points
+    if (pts.length < 2) continue
+    if (m.type === "distance") {
+      out.push({ type: "Feature", geometry: { type: "LineString", coordinates: pts }, properties: { t: "line", id: m.id } })
+    } else if (m.type === "area" && pts.length >= 3) {
+      const ring = [...pts, pts[0]]
+      out.push({ type: "Feature", geometry: { type: "Polygon", coordinates: [ring] }, properties: { t: "area-fill", id: m.id } })
+      out.push({ type: "Feature", geometry: { type: "LineString", coordinates: ring }, properties: { t: "area-outline", id: m.id } })
+    } else if (m.type === "radius") {
+      const ring = circleRing(pts[0], segmentDist(pts[0], pts[1]))
+      out.push({ type: "Feature", geometry: { type: "Polygon", coordinates: [ring] }, properties: { t: "radius-fill", id: m.id } })
+      out.push({ type: "Feature", geometry: { type: "LineString", coordinates: ring }, properties: { t: "radius-outline", id: m.id } })
+      out.push({ type: "Feature", geometry: { type: "LineString", coordinates: [pts[0], pts[1]] }, properties: { t: "radius-spoke", id: m.id } })
+    }
+  }
+  return out
+}
+
+function updateSavedMeasures(map: maplibregl.Map, measurements: SavedMeasurement[]) {
+  const src = map.getSource(SAVED_MEAS_SOURCE) as maplibregl.GeoJSONSource | undefined
+  if (!src) return
+  src.setData({ type: "FeatureCollection", features: buildSavedMeasureFeatures(measurements) })
+}
+
+// ─── Measure map layers ────────────────────────────────────────────────────────
+
+const MEASURE_SOURCE = "measure-source"
+
+function initMeasureLayers(map: maplibregl.Map) {
+  if (map.getSource(MEASURE_SOURCE)) return
+  map.addSource(MEASURE_SOURCE, { type: "geojson", data: { type: "FeatureCollection", features: [] } })
+  map.addLayer({ id: "measure-fill", type: "fill", source: MEASURE_SOURCE,
+    filter: ["match", ["get", "t"], ["area-fill", "radius-fill"], true, false],
+    paint: { "fill-color": "#38bdf8", "fill-opacity": 0.15 } })
+  map.addLayer({ id: "measure-line", type: "line", source: MEASURE_SOURCE,
+    filter: ["match", ["get", "t"], ["line", "area-outline", "radius-outline", "radius-spoke"], true, false],
+    paint: { "line-color": "#38bdf8", "line-width": 2, "line-dasharray": [3, 1.5] } })
+  map.addLayer({ id: "measure-pts", type: "circle", source: MEASURE_SOURCE,
+    filter: ["==", ["get", "t"], "pt"],
+    paint: { "circle-radius": 5, "circle-color": "#38bdf8", "circle-stroke-width": 2, "circle-stroke-color": "#fff" } })
+  // Snap-to-close ring on first vertex (draw-polygon only)
+  map.addLayer({ id: "measure-pts-close", type: "circle", source: MEASURE_SOURCE,
+    filter: ["==", ["get", "t"], "pt-close"],
+    paint: { "circle-radius": 10, "circle-color": "rgba(0,0,0,0)", "circle-stroke-width": 2, "circle-stroke-color": "#38bdf8" } })
+}
+
+function updateMeasureLayers(
+  map: maplibregl.Map, mode: ToolMode,
+  pts: [number, number][], preview: [number, number] | null
+) {
+  const src = map.getSource(MEASURE_SOURCE) as maplibregl.GeoJSONSource | undefined
+  if (!src) return
+  // For radius: once 2 pts are placed, ignore preview so the circle stays fixed
+  const effectivePreview = (mode === "radius" && pts.length >= 2) ? null : preview
+  const all = effectivePreview ? [...pts, effectivePreview] : pts
+  const features: GeoJSON.Feature[] = []
+
+  // Placed vertex dots — all modes including draw-polygon
+  for (const p of pts) {
+    features.push({ type: "Feature", geometry: { type: "Point", coordinates: p }, properties: { t: "pt" } })
+  }
+
+  if (mode === "distance" && all.length >= 2) {
+    features.push({ type: "Feature", geometry: { type: "LineString", coordinates: all }, properties: { t: "line" } })
+  } else if ((mode === "area" || mode === "draw-polygon") && all.length >= 3) {
+    const ring = [...all, all[0]]
+    features.push({ type: "Feature", geometry: { type: "Polygon", coordinates: [ring] }, properties: { t: "area-fill" } })
+    features.push({ type: "Feature", geometry: { type: "LineString", coordinates: ring }, properties: { t: "area-outline" } })
+  } else if ((mode === "area" || mode === "draw-polygon") && all.length === 2) {
+    features.push({ type: "Feature", geometry: { type: "LineString", coordinates: all }, properties: { t: "area-outline" } })
+  } else if (mode === "radius") {
+    if (pts.length >= 1 && all.length >= 2) {
+      const center = pts[0]
+      const edgePt = pts.length >= 2 ? pts[1] : all[all.length - 1]
+      const radius = segmentDist(center, edgePt)
+      const ring = circleRing(center, radius)
+      features.push({ type: "Feature", geometry: { type: "Polygon", coordinates: [ring] }, properties: { t: "radius-fill" } })
+      features.push({ type: "Feature", geometry: { type: "LineString", coordinates: ring }, properties: { t: "radius-outline" } })
+      features.push({ type: "Feature", geometry: { type: "LineString", coordinates: [center, edgePt] }, properties: { t: "radius-spoke" } })
+    }
+  }
+
+  // Snap-to-close ring on first vertex once polygon is closeable
+  if (mode === "draw-polygon" && pts.length >= 3) {
+    features.push({ type: "Feature", geometry: { type: "Point", coordinates: pts[0] }, properties: { t: "pt-close" } })
+  }
+
+  src.setData({ type: "FeatureCollection", features })
+}
+
+function removeMeasureLayers(map: maplibregl.Map) {
+  for (const id of ["measure-pts-close", "measure-pts", "measure-line", "measure-fill"]) {
+    if (map.getLayer(id)) map.removeLayer(id)
+  }
+  if (map.getSource(MEASURE_SOURCE)) map.removeSource(MEASURE_SOURCE)
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function UrbexMap() {
@@ -600,6 +818,9 @@ export default function UrbexMap() {
   const infraRef = useRef(false)
   const streetViewModeRef = useRef(false)
   const globeModeRef = useRef(false)
+  const toolModeRef = useRef<ToolMode>("off")
+  const measurePointsRef = useRef<[number, number][]>([])
+  const savedMeasurementsRef = useRef<SavedMeasurement[]>([])
   const filteredVersionsRef = useRef<WaybackVersion[]>([])
   const selectedVersionIdRef = useRef<string | null>(null)
   const availCheckTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -646,7 +867,41 @@ export default function UrbexMap() {
   const [searchResults, setSearchResults] = useState<NominatimResult[]>([])
   const [searchOpen, setSearchOpen] = useState(false)
 
+  // Tool mode + measurement
+  const [toolMode, setToolMode] = useState<ToolMode>("off")
+  const [measurePoints, setMeasurePoints] = useState<[number, number][]>([])
+  const [measurePreview, setMeasurePreview] = useState<[number, number] | null>(null)
+  const [savedMeasurements, setSavedMeasurements] = useState<SavedMeasurement[]>([])
+
+  // Checkpoint dialog (shown after right-click status pick)
+  const [checkpointDialog, setCheckpointDialog] = useState<CheckpointDialogState | null>(null)
+  const [checkpointName, setCheckpointName] = useState("")
+  const [checkpointTagInput, setCheckpointTagInput] = useState("")
+
+  // Locations panel
+  const [locationsOpen, setLocationsOpen] = useState(false)
+  const [locationsPanelPos, setLocationsPanelPos] = useState({ x: 16, y: 320 })
+  const [locationsSearch, setLocationsSearch] = useState("")
+  const [locationsTypeFilter, setLocationsTypeFilter] = useState<"all" | "checkpoint" | "polygon" | "measurement">("all")
+  const [locationsTagFilter, setLocationsTagFilter] = useState<string | null>(null)
+  const locationsDragRef = useRef<{ startX: number; startY: number; startPX: number; startPY: number } | null>(null)
+
   useEffect(() => { polygonsRef.current = polygons }, [polygons])
+
+  // Sync polygons → persistent map layer
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !map.isStyleLoaded()) return
+    updateUserPolygons(map, polygons)
+  }, [polygons])
+
+  // Sync saved measurements → persistent map layer
+  useEffect(() => {
+    savedMeasurementsRef.current = savedMeasurements
+    const map = mapRef.current
+    if (!map || !map.isStyleLoaded()) return
+    updateSavedMeasures(map, savedMeasurements)
+  }, [savedMeasurements])
 
   const showToast = useCallback((msg: string) => {
     setToast(msg); setTimeout(() => setToast(null), 3000)
@@ -680,14 +935,71 @@ export default function UrbexMap() {
       scrollZoom: true, dragPan: true, dragRotate: true, doubleClickZoom: true, touchZoomRotate: true,
     })
     mapRef.current = map
-    map.on("mousemove", (e) => setCoords({ lng: e.lngLat.lng, lat: e.lngLat.lat }))
+    map.on("mousemove", (e) => {
+      setCoords({ lng: e.lngLat.lng, lat: e.lngLat.lat })
+      const tm = toolModeRef.current
+      const radiusDone = tm === "radius" && measurePointsRef.current.length >= 2
+      if (tm !== "off" && tm !== "placemark" && !radiusDone) {
+        setMeasurePreview([e.lngLat.lng, e.lngLat.lat])
+      }
+    })
     map.on("contextmenu", (e) => {
       if (streetViewModeRef.current) return
+      if (toolModeRef.current !== "off") return
       e.preventDefault()
       setContextMenu({ x: e.point.x, y: e.point.y, lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat } })
       setSelectedCheckpoint(null); setSelectedPolygon(null); setAreaMenuPos(null)
     })
     map.on("click", (e) => {
+      // Measure / placemark tool intercepts all clicks
+      const tm = toolModeRef.current
+      if (tm !== "off") {
+        if (tm === "placemark") {
+          const { x, y } = e.point
+          setCheckpointDialog({ lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat }, status: "worth-exploring", screen: { x, y } })
+          setCheckpointName("")
+          setCheckpointTagInput("")
+          return
+        }
+        // draw-polygon: check close-on-first-vertex
+        if (tm === "draw-polygon") {
+          const pt: [number, number] = [e.lngLat.lng, e.lngLat.lat]
+          const pts = measurePointsRef.current
+          if (pts.length >= 3) {
+            const firstScreen = map.project([pts[0][0], pts[0][1]])
+            const dist = Math.hypot(e.point.x - firstScreen.x, e.point.y - firstScreen.y)
+            if (dist < 14) {
+              // close the shape
+              const id = crypto.randomUUID()
+              const ring: [number, number][] = [...pts, pts[0]]
+              const geometry: GeoJSON.Polygon = { type: "Polygon", coordinates: [ring] }
+              const label = `Area ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+              const poly: DrawnPolygon = { id, geometry, label, status: null, timestamp: new Date(), tags: [] }
+              setPolygons(prev => [...prev, poly])
+              const [clng, clat] = computeCentroid(geometry)
+              const labelEl = document.createElement("div")
+              Object.assign(labelEl.style, { background: "rgba(0,0,0,0.72)", color: "#d4d4d8", fontSize: "11px", fontFamily: "ui-sans-serif, system-ui, sans-serif", padding: "2px 8px", borderRadius: "4px", whiteSpace: "nowrap", pointerEvents: "none", border: "1px solid rgba(255,255,255,0.1)" })
+              labelEl.textContent = label
+              labelMarkersRef.current.set(id, new maplibregl.Marker({ element: labelEl }).setLngLat([clng, clat]).addTo(map))
+              toolModeRef.current = "off"; setToolMode("off")
+              measurePointsRef.current = []; setMeasurePoints([]); setMeasurePreview(null)
+              return
+            }
+          }
+          const newPts = [...pts, pt]
+          measurePointsRef.current = newPts; setMeasurePoints(newPts)
+          return
+        }
+
+        // measure modes
+        const pt: [number, number] = [e.lngLat.lng, e.lngLat.lat]
+        const newPts = [...measurePointsRef.current, pt]
+        measurePointsRef.current = newPts
+        setMeasurePoints(newPts)
+        // radius: auto-finish after 2 points — preview cleared by effect (effectivePreview handles it)
+        return
+      }
+
       if (streetViewModeRef.current) {
         const { lat, lng } = e.lngLat
         window.open(
@@ -733,26 +1045,14 @@ export default function UrbexMap() {
       if (!mapRef.current) return
       map.resize()
       applyActiveOverlays(map, terrainRef.current, streetViewRef.current, cadastreRef.current, buildingsRef.current, labelsRef.current, nightLightsRef.current, firesRef.current, floodsRef.current, waterRef.current, forestRef.current, infraRef.current)
-      const draw = new MapboxDraw({ displayControlsDefault: false, controls: {}, defaultMode: "simple_select", styles: DRAW_STYLES })
-      map.addControl(draw as unknown as maplibregl.IControl)
-      drawRef.current = draw
-      map.on("draw.create", (e: { features: GeoJSON.Feature[] }) => {
-        const feature = e.features[0]
-        if (!feature || feature.geometry.type !== "Polygon") return
-        const poly: DrawnPolygon = { id: String(feature.id), geometry: feature.geometry as GeoJSON.Polygon, label: `Area ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`, status: null, timestamp: new Date() }
-        setPolygons((prev) => [...prev, poly])
-        const [lng, lat] = computeCentroid(poly.geometry)
-        const labelEl = document.createElement("div")
-        Object.assign(labelEl.style, { background: "rgba(0,0,0,0.72)", color: "#d4d4d8", fontSize: "11px", fontFamily: "ui-sans-serif, system-ui, sans-serif", padding: "2px 8px", borderRadius: "4px", whiteSpace: "nowrap", pointerEvents: "none", border: "1px solid rgba(255,255,255,0.1)" })
-        labelEl.textContent = poly.label
-        labelMarkersRef.current.set(poly.id, new maplibregl.Marker({ element: labelEl }).setLngLat([lng, lat]).addTo(map))
-        draw.changeMode("simple_select")
-      })
-      map.on("draw.selectionchange", (e: { features: GeoJSON.Feature[] }) => {
-        if (!e.features.length) return
-        const feature = e.features[0]
-        if (feature.geometry.type !== "Polygon") return
-        const poly = polygonsRef.current.find((p) => p.id === String(feature.id))
+      initUserLayers(map)
+      // Click on a drawn polygon → show area action menu
+      map.on("click", "user-poly-fill", (e) => {
+        if (toolModeRef.current !== "off") return
+        const feat = e.features?.[0]
+        if (!feat) return
+        const polyId = feat.properties?.polyId as string | undefined
+        const poly = polygonsRef.current.find(p => p.id === polyId)
         if (!poly) return
         const [lng, lat] = computeCentroid(poly.geometry)
         const pt = map.project([lng, lat])
@@ -760,6 +1060,11 @@ export default function UrbexMap() {
         setAreaMenuPos({ x: clamp(pt.x - 112, 8, window.innerWidth - 240), y: clamp(pt.y - 20, 8, window.innerHeight - 420) })
         setSelectedCheckpoint(null); setContextMenu(null)
       })
+      map.on("mouseenter", "user-poly-fill", () => { if (toolModeRef.current === "off") map.getCanvas().style.cursor = "pointer" })
+      map.on("mouseleave", "user-poly-fill", () => { if (toolModeRef.current === "off") map.getCanvas().style.cursor = "" })
+      const draw = new MapboxDraw({ displayControlsDefault: false, controls: {}, defaultMode: "simple_select", styles: DRAW_STYLES })
+      map.addControl(draw as unknown as maplibregl.IControl)
+      drawRef.current = draw
     })
     return () => { initRef.current = false; map.remove(); mapRef.current = null; drawRef.current = null }
   }, [])
@@ -792,6 +1097,9 @@ export default function UrbexMap() {
         if (waybackVersionsRef.current.length > 0) checkWaybackAvailability()
       }
       applyActiveOverlays(map, terrainRef.current, streetViewRef.current, cadastreRef.current, buildingsRef.current, labelsRef.current, nightLightsRef.current, firesRef.current, floodsRef.current, waterRef.current, forestRef.current, infraRef.current)
+      initUserLayers(map)
+      updateUserPolygons(map, polygonsRef.current)
+      updateSavedMeasures(map, savedMeasurementsRef.current)
       if (globeModeRef.current) {
         map.setProjection({ type: "globe" })
         map.setSky({ "sky-color": "#0d1f4a", "horizon-color": "#b0d0f0", "atmosphere-blend": 0.85 })
@@ -799,7 +1107,6 @@ export default function UrbexMap() {
       const newDraw = new MapboxDraw({ displayControlsDefault: false, controls: {}, defaultMode: "simple_select", styles: DRAW_STYLES })
       map.addControl(newDraw as unknown as maplibregl.IControl)
       drawRef.current = newDraw
-      if (savedFeatures && savedFeatures.features.length > 0) newDraw.set(savedFeatures)
     })
   }, [baseLayer])
 
@@ -942,13 +1249,64 @@ export default function UrbexMap() {
     if (!cadastreOverlay) setCadastreCard(null)
   }, [cadastreOverlay])
 
+  // ── Tool mode ──────────────────────────────────────────────────────────────
+  useEffect(() => {
+    toolModeRef.current = toolMode
+    const map = mapRef.current
+    const canvas = map?.getCanvas()
+    if (canvas) {
+      if (toolMode === "off") canvas.style.cursor = streetViewModeRef.current ? "crosshair" : ""
+      else if (toolMode === "placemark") canvas.style.cursor = "cell"
+      else canvas.style.cursor = "crosshair"
+    }
+    const needsLayers = toolMode !== "off" && toolMode !== "placemark"
+    if (toolMode === "off" && map && map.isStyleLoaded()) {
+      removeMeasureLayers(map)
+      measurePointsRef.current = []
+      setMeasurePoints([])
+      setMeasurePreview(null)
+    } else if (needsLayers && map && map.isStyleLoaded()) {
+      initMeasureLayers(map)
+    }
+  }, [toolMode])
+
+  // ── Measure layers update ──────────────────────────────────────────────────
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !map.isStyleLoaded()) return
+    if (toolMode === "off" || toolMode === "placemark") return
+
+    if (!map.getSource(MEASURE_SOURCE)) initMeasureLayers(map)
+    updateMeasureLayers(map, toolMode, measurePoints, measurePreview)
+  }, [toolMode, measurePoints, measurePreview])
+
+  // ── Locations panel drag ───────────────────────────────────────────────────
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!locationsDragRef.current) return
+      const { startX, startY, startPX, startPY } = locationsDragRef.current
+      setLocationsPanelPos({
+        x: clamp(startPX + e.clientX - startX, 0, window.innerWidth - 320),
+        y: clamp(startPY + e.clientY - startY, 0, window.innerHeight - 100),
+      })
+    }
+    const onUp = () => { locationsDragRef.current = null }
+    window.addEventListener("mousemove", onMove)
+    window.addEventListener("mouseup", onUp)
+    return () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp) }
+  }, [])
+
   // ── Checkpoint ────────────────────────────────────────────────────────────
-  const addCheckpoint = useCallback((lngLat: { lng: number; lat: number }, status: StatusKey) => {
+  const addCheckpoint = useCallback((
+    lngLat: { lng: number; lat: number }, status: StatusKey,
+    name = "", tags: string[] = [], customColor?: string
+  ) => {
     const cfg = STATUSES.find((s) => s.key === status)!
+    const color = customColor ?? cfg.color
     const id = crypto.randomUUID()
-    const cp: Checkpoint = { id, lngLat, status, label: "", notes: "", timestamp: new Date() }
+    const cp: Checkpoint = { id, lngLat, status, label: name, notes: "", timestamp: new Date(), tags, customColor }
     setCheckpoints((prev) => [...prev, cp])
-    const el = makeMarkerEl(cfg.color)
+    const el = makeMarkerEl(color)
     const marker = new maplibregl.Marker({ element: el }).setLngLat([lngLat.lng, lngLat.lat]).addTo(mapRef.current!)
     el.addEventListener("click", (e) => { e.stopPropagation(); setSelectedCheckpoint(cp); setContextMenu(null); setSelectedPolygon(null); setAreaMenuPos(null) })
     markersRef.current.set(id, marker)
@@ -956,6 +1314,96 @@ export default function UrbexMap() {
   }, [])
 
   const startDraw = useCallback(() => { drawRef.current?.changeMode("draw_polygon") }, [])
+
+  const finishPolygon = useCallback((pts: [number, number][]) => {
+    if (pts.length < 3) return
+    const id = crypto.randomUUID()
+    const ring: [number, number][] = [...pts, pts[0]]
+    const geometry: GeoJSON.Polygon = { type: "Polygon", coordinates: [ring] }
+    const label = `Area ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+    const poly: DrawnPolygon = { id, geometry, label, status: null, timestamp: new Date(), tags: [] }
+    setPolygons(prev => [...prev, poly])
+    const map = mapRef.current
+    if (map) {
+      const [lng, lat] = computeCentroid(geometry)
+      const labelEl = document.createElement("div")
+      Object.assign(labelEl.style, { background: "rgba(0,0,0,0.72)", color: "#d4d4d8", fontSize: "11px", fontFamily: "ui-sans-serif, system-ui, sans-serif", padding: "2px 8px", borderRadius: "4px", whiteSpace: "nowrap", pointerEvents: "none", border: "1px solid rgba(255,255,255,0.1)" })
+      labelEl.textContent = label
+      labelMarkersRef.current.set(id, new maplibregl.Marker({ element: labelEl }).setLngLat([lng, lat]).addTo(map))
+    }
+    toolModeRef.current = "off"
+    setToolMode("off")
+    measurePointsRef.current = []
+    setMeasurePoints([])
+    setMeasurePreview(null)
+  }, [])
+
+  // ── Keyboard shortcuts ────────────────────────────────────────────────────
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tm = toolModeRef.current
+      if (tm === "off") return
+      if (e.key === "Escape") {
+        e.preventDefault()
+        if (tm === "placemark") {
+          toolModeRef.current = "off"; setToolMode("off"); setCheckpointDialog(null); return
+        }
+        const pts = measurePointsRef.current
+        if (pts.length === 0) {
+          toolModeRef.current = "off"; setToolMode("off")
+        } else {
+          const next = pts.slice(0, -1)
+          measurePointsRef.current = next
+          setMeasurePoints(next)
+        }
+      }
+      if ((e.key === "Enter" || e.key === "f") && tm === "draw-polygon") {
+        e.preventDefault()
+        finishPolygon(measurePointsRef.current)
+      }
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [finishPolygon])
+
+  const clearMeasure = useCallback(() => {
+    measurePointsRef.current = []
+    setMeasurePoints([])
+    setMeasurePreview(null)
+    const map = mapRef.current
+    if (map && map.isStyleLoaded() && map.getSource(MEASURE_SOURCE)) {
+      updateMeasureLayers(map, toolModeRef.current, [], null)
+    }
+  }, [])
+
+  const saveMeasurement = useCallback((pts: [number, number][], mode: ToolMode) => {
+    if (pts.length < 2) return
+    let value = 0
+    if (mode === "distance") value = pathLength(pts)
+    else if (mode === "area") value = sphericalArea(pts)
+    else if (mode === "radius") value = segmentDist(pts[0], pts[1])
+    const label = mode === "distance"
+      ? `Path ${fmtDist(value)}`
+      : mode === "area"
+      ? `Area ${fmtMeasureArea(value)}`
+      : `Radius ${fmtDist(value)}`
+    const m: SavedMeasurement = { id: crypto.randomUUID(), type: mode as "distance" | "area" | "radius", points: pts, value, label, tags: [], timestamp: new Date() }
+    const next = [...savedMeasurementsRef.current, m]
+    savedMeasurementsRef.current = next
+    // Update the persistent map layer BEFORE clearing the in-progress layer so
+    // there is no frame where the measurement is invisible.
+    const map = mapRef.current
+    if (map && map.isStyleLoaded()) updateSavedMeasures(map, next)
+    setSavedMeasurements(next)
+    clearMeasure()
+  }, [clearMeasure])
+
+  // Derived tag list from all saved items
+  const allTags = Array.from(new Set([
+    ...checkpoints.flatMap(c => c.tags),
+    ...polygons.flatMap(p => p.tags),
+    ...savedMeasurements.flatMap(m => m.tags),
+  ])).sort()
 
   // ── Search ────────────────────────────────────────────────────────────────
   const handleSearchInput = useCallback((query: string) => {
@@ -1053,30 +1501,67 @@ export default function UrbexMap() {
             </div>
           )}
         </div>
-        <button onClick={startDraw} className="flex items-center gap-2 w-fit bg-zinc-900/90 backdrop-blur-sm text-zinc-200 text-sm px-3 py-2 rounded-lg border border-zinc-700/60 hover:bg-zinc-800 hover:text-white transition-colors shadow-lg">
-          <PolygonIcon /> Draw Area
-        </button>
+        {/* Draw / tools group */}
+        <div className="bg-zinc-900/90 backdrop-blur-sm border border-zinc-700/60 rounded-xl shadow-lg overflow-hidden">
+          <div className="px-2 pt-2 pb-1">
+            <div className="text-[9px] uppercase tracking-widest font-semibold text-zinc-600 px-1.5 mb-1">Draw</div>
+            <button
+              onClick={() => setToolMode(v => v === "draw-polygon" ? "off" : "draw-polygon")}
+              className={`flex items-center gap-2 w-full text-sm px-2 py-1.5 rounded-lg transition-colors ${toolMode === "draw-polygon" ? "bg-sky-500/20 text-sky-300 font-semibold" : "text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"}`}>
+              <PolygonIcon /> Area
+            </button>
+            <button
+              onClick={() => setToolMode((v) => v === "placemark" ? "off" : "placemark")}
+              className={`flex items-center gap-2 w-full text-sm px-2 py-1.5 rounded-lg transition-colors ${toolMode === "placemark" ? "bg-amber-500/20 text-amber-300 font-semibold" : "text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"}`}>
+              <PlacemarkIcon /> Placemark
+            </button>
+          </div>
+          <div className="border-t border-zinc-800 mx-2" />
+          <div className="px-2 pt-1 pb-2">
+            <div className="text-[9px] uppercase tracking-widest font-semibold text-zinc-600 px-1.5 mt-1 mb-1">Measure</div>
+            {(["distance", "area", "radius"] as const).map(m => (
+              <button key={m}
+                onClick={() => setToolMode((v) => v === m ? "off" : m)}
+                className={`flex items-center gap-2 w-full text-sm px-2 py-1.5 rounded-lg transition-colors ${toolMode === m ? "bg-sky-500/20 text-sky-300 font-semibold" : "text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"}`}>
+                <MeasureIcon type={m} />
+                {m === "distance" ? "Distance" : m === "area" ? "Area" : "Radius"}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* View buttons */}
         <button
           onClick={() => setStreetViewMode((v) => !v)}
-          title={streetViewMode ? "Click the map to open Street View at that point" : "Enable Street View click mode"}
           className={`flex items-center gap-2 w-fit text-sm px-3 py-2 rounded-lg border transition-colors shadow-lg ${
-            streetViewMode
-              ? "bg-blue-500 text-white border-blue-400 hover:bg-blue-600"
+            streetViewMode ? "bg-blue-500 text-white border-blue-400 hover:bg-blue-600"
               : "bg-zinc-900/90 backdrop-blur-sm text-zinc-200 border-zinc-700/60 hover:bg-zinc-800 hover:text-white"
-          }`}
-        >
-          <StreetViewIcon /> Street View{streetViewMode && <span className="text-xs opacity-75">· click map</span>}
+          }`}>
+          <StreetViewIcon /> Street View{streetViewMode && <span className="text-xs opacity-75">· click</span>}
         </button>
         <button
           onClick={() => setGlobeMode((v) => !v)}
-          title={globeMode ? "Switch to flat map" : "Switch to 3D globe projection"}
           className={`flex items-center gap-2 w-fit text-sm px-3 py-2 rounded-lg border transition-colors shadow-lg ${
-            globeMode
-              ? "bg-indigo-500 text-white border-indigo-400 hover:bg-indigo-600"
+            globeMode ? "bg-indigo-500 text-white border-indigo-400 hover:bg-indigo-600"
               : "bg-zinc-900/90 backdrop-blur-sm text-zinc-200 border-zinc-700/60 hover:bg-zinc-800 hover:text-white"
-          }`}
-        >
+          }`}>
           <GlobeIcon /> {globeMode ? "Flat Map" : "3D Globe"}
+        </button>
+
+        {/* Saved locations */}
+        <button
+          onClick={() => setLocationsOpen((v) => !v)}
+          className={`flex items-center gap-2 w-fit text-sm px-3 py-2 rounded-lg border transition-colors shadow-lg ${
+            locationsOpen ? "bg-zinc-100 text-zinc-900 border-zinc-300 font-semibold"
+              : "bg-zinc-900/90 backdrop-blur-sm text-zinc-200 border-zinc-700/60 hover:bg-zinc-800 hover:text-white"
+          }`}>
+          <LocationsIcon active={locationsOpen} />
+          Locations
+          {(checkpoints.length + polygons.length + savedMeasurements.length) > 0 && (
+            <span className="bg-zinc-700 text-zinc-300 text-[9px] font-bold px-1.5 py-0.5 rounded-full leading-none">
+              {checkpoints.length + polygons.length + savedMeasurements.length}
+            </span>
+          )}
         </button>
       </div>
 
@@ -1250,7 +1735,14 @@ export default function UrbexMap() {
             <span className="text-[10px] font-medium text-zinc-500 uppercase tracking-wider">Mark location</span>
           </div>
           {STATUSES.map((s) => (
-            <button key={s.key} onClick={() => addCheckpoint(contextMenu.lngLat, s.key)} className="flex items-center gap-2.5 w-full px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800 transition-colors">
+            <button key={s.key}
+              onClick={() => {
+                setContextMenu(null)
+                setCheckpointDialog({ lngLat: contextMenu.lngLat, status: s.key, screen: { x: contextMenu.x, y: contextMenu.y } })
+                setCheckpointName("")
+                setCheckpointTagInput("")
+              }}
+              className="flex items-center gap-2.5 w-full px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800 transition-colors">
               <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: s.color }} />
               {s.label}
             </button>
@@ -1434,17 +1926,30 @@ export default function UrbexMap() {
 
       {/* ── Checkpoint profile ───────────────────────────────────────────────── */}
       {selectedCheckpoint && (
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl p-4 w-72">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: STATUSES.find((s) => s.key === selectedCheckpoint.status)?.color }} />
-              <span className="text-sm font-semibold text-zinc-100">{STATUSES.find((s) => s.key === selectedCheckpoint.status)?.label}</span>
-            </div>
-            <button onClick={() => setSelectedCheckpoint(null)} className="text-zinc-500 hover:text-zinc-300 leading-none w-6 h-6 flex items-center justify-center text-xl">×</button>
-          </div>
-          <div className="text-xs font-mono text-zinc-400 mb-1">{selectedCheckpoint.lngLat.lat.toFixed(5)}, {selectedCheckpoint.lngLat.lng.toFixed(5)}</div>
-          <div className="text-xs text-zinc-600">{selectedCheckpoint.timestamp.toLocaleString()}</div>
-        </div>
+        <CheckpointPanel
+          checkpoint={selectedCheckpoint}
+          allTags={allTags}
+          onClose={() => setSelectedCheckpoint(null)}
+          onUpdate={(updated) => {
+            setCheckpoints(prev => prev.map(c => c.id === updated.id ? updated : c))
+            setSelectedCheckpoint(updated)
+            // Re-color the marker
+            const marker = markersRef.current.get(updated.id)
+            if (marker) {
+              const s = STATUSES.find(s => s.key === updated.status)
+              const color = updated.customColor ?? s?.color ?? "#888"
+              const el = marker.getElement()
+              if (el) el.style.background = color
+            }
+          }}
+          onDelete={() => {
+            markersRef.current.get(selectedCheckpoint.id)?.remove()
+            markersRef.current.delete(selectedCheckpoint.id)
+            setCheckpoints(prev => prev.filter(c => c.id !== selectedCheckpoint.id))
+            setSelectedCheckpoint(null)
+          }}
+          onFlyTo={() => mapRef.current?.flyTo({ center: [selectedCheckpoint.lngLat.lng, selectedCheckpoint.lngLat.lat], zoom: 16, duration: 1000 })}
+        />
       )}
 
       {/* ── Area Action Menu ─────────────────────────────────────────────────── */}
@@ -1521,6 +2026,187 @@ export default function UrbexMap() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── Checkpoint dialog ───────────────────────────────────────────────── */}
+      {checkpointDialog && (() => {
+        const s = STATUSES.find(s => s.key === checkpointDialog.status)!
+        const sx = clamp(checkpointDialog.screen.x, 8, (typeof window !== "undefined" ? window.innerWidth : 800) - 280)
+        const sy = clamp(checkpointDialog.screen.y + 8, 8, (typeof window !== "undefined" ? window.innerHeight : 600) - 220)
+        return (
+          <div className="absolute z-30 w-64 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl overflow-hidden" style={{ left: sx, top: sy }}>
+            <div className="flex items-center gap-2 px-3 py-2.5 border-b border-zinc-800">
+              <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: s.color }} />
+              <span className="text-xs font-semibold text-zinc-300">{s.label}</span>
+              <button onClick={() => setCheckpointDialog(null)} className="ml-auto text-zinc-500 hover:text-zinc-300 text-xl leading-none">×</button>
+            </div>
+            <div className="p-3 flex flex-col gap-2">
+              <input autoFocus type="text" value={checkpointName} onChange={e => setCheckpointName(e.target.value)}
+                placeholder="Name (optional)"
+                className="bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-500 w-full"
+                onKeyDown={e => {
+                  if (e.key === "Enter") {
+                    const tags = checkpointTagInput.split(",").map(t => t.trim()).filter(Boolean)
+                    addCheckpoint(checkpointDialog.lngLat, checkpointDialog.status, checkpointName, tags)
+                    setCheckpointDialog(null)
+                  }
+                  if (e.key === "Escape") setCheckpointDialog(null)
+                }}
+              />
+              <input type="text" value={checkpointTagInput} onChange={e => setCheckpointTagInput(e.target.value)}
+                placeholder="Tags (comma separated)"
+                className="bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-500 w-full"
+              />
+              {allTags.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {allTags.slice(0, 8).map(t => (
+                    <button key={t} onClick={() => setCheckpointTagInput(v => v ? `${v}, ${t}` : t)}
+                      className="text-[10px] bg-zinc-800 border border-zinc-700 text-zinc-400 hover:text-zinc-200 px-1.5 py-0.5 rounded-md transition-colors">
+                      {t}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="flex gap-2 pt-1">
+                <button onClick={() => setCheckpointDialog(null)} className="flex-1 text-xs text-zinc-500 hover:text-zinc-300 py-1.5 transition-colors">Cancel</button>
+                <button
+                  onClick={() => {
+                    const tags = checkpointTagInput.split(",").map(t => t.trim()).filter(Boolean)
+                    addCheckpoint(checkpointDialog.lngLat, checkpointDialog.status, checkpointName, tags)
+                    setCheckpointDialog(null)
+                  }}
+                  className="flex-1 bg-zinc-700 hover:bg-zinc-600 text-zinc-100 text-xs font-semibold py-1.5 rounded-lg transition-colors">
+                  Add
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* ── Measure / Draw HUD ──────────────────────────────────────────────── */}
+      {toolMode !== "off" && toolMode !== "placemark" && (
+        <div className="absolute bottom-14 left-1/2 -translate-x-1/2 z-20 bg-zinc-900/95 backdrop-blur-sm border border-zinc-700/60 rounded-xl shadow-xl px-4 py-3 flex items-center gap-4 select-none">
+          <div className="flex flex-col items-center gap-0.5 min-w-[120px]">
+            <span className="text-[9px] uppercase tracking-widest text-zinc-500">
+              {toolMode === "distance" ? "Distance" : toolMode === "area" ? "Area" : toolMode === "radius" ? "Radius" : "Draw Area"}
+            </span>
+            <span className="text-sm font-semibold tabular-nums text-sky-300">
+              {toolMode === "draw-polygon"
+                ? measurePoints.length === 0
+                  ? "Click to start"
+                  : measurePoints.length < 3
+                  ? `${measurePoints.length} pt${measurePoints.length > 1 ? "s" : ""} — need 3`
+                  : `${measurePoints.length} pts · click ● to close`
+                : toolMode === "distance" && measurePoints.length >= 2
+                ? fmtDist(pathLength(measurePoints))
+                : toolMode === "distance" && measurePoints.length === 1
+                ? measurePreview ? fmtDist(segmentDist(measurePoints[0], measurePreview)) : "—"
+                : toolMode === "area" && measurePoints.length >= 3
+                ? fmtMeasureArea(sphericalArea([...measurePoints, ...(measurePreview ? [measurePreview] : [])]))
+                : toolMode === "radius" && measurePoints.length >= 2
+                ? fmtDist(segmentDist(measurePoints[0], measurePoints[1]))
+                : toolMode === "radius" && measurePoints.length === 1
+                ? measurePreview ? fmtDist(segmentDist(measurePoints[0], measurePreview)) : "—"
+                : measurePoints.length === 0 ? "Click to start" : "—"
+              }
+            </span>
+            {toolMode === "draw-polygon" && measurePoints.length > 0 && (
+              <span className="text-[9px] text-zinc-600">Esc = undo · Enter = finish</span>
+            )}
+          </div>
+          <div className="flex gap-2">
+            {toolMode === "draw-polygon" && measurePoints.length >= 3 && (
+              <button onClick={() => finishPolygon(measurePoints)}
+                className="text-xs bg-sky-600 hover:bg-sky-500 text-white font-semibold px-3 py-1.5 rounded-lg transition-colors">
+                Finish
+              </button>
+            )}
+            {toolMode !== "draw-polygon" && measurePoints.length >= 2 && (
+              <button onClick={() => saveMeasurement(measurePoints, toolMode)}
+                className="text-xs bg-sky-600 hover:bg-sky-500 text-white font-semibold px-3 py-1.5 rounded-lg transition-colors">
+                Save
+              </button>
+            )}
+            <button onClick={clearMeasure}
+              className="text-xs bg-zinc-700 hover:bg-zinc-600 text-zinc-200 px-3 py-1.5 rounded-lg transition-colors">
+              Clear
+            </button>
+            <button onClick={() => { setToolMode("off"); clearMeasure() }}
+              className="text-xs text-zinc-500 hover:text-zinc-300 px-2 py-1.5 transition-colors">
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Placemark mode indicator */}
+      {toolMode === "placemark" && (
+        <div className="absolute bottom-14 left-1/2 -translate-x-1/2 z-20 bg-zinc-900/95 backdrop-blur-sm border border-amber-500/30 rounded-xl shadow-xl px-4 py-2.5 flex items-center gap-3 select-none">
+          <PlacemarkIcon />
+          <span className="text-xs text-amber-300 font-medium">Click map to place a marker</span>
+          <button onClick={() => setToolMode("off")} className="text-zinc-500 hover:text-zinc-300 text-lg leading-none ml-1">×</button>
+        </div>
+      )}
+
+      {/* ── Locations panel ─────────────────────────────────────────────────── */}
+      {locationsOpen && (
+        <LocationsPanel
+          pos={locationsPanelPos}
+          onDragStart={(e) => {
+            locationsDragRef.current = { startX: e.clientX, startY: e.clientY, startPX: locationsPanelPos.x, startPY: locationsPanelPos.y }
+          }}
+          onClose={() => setLocationsOpen(false)}
+          checkpoints={checkpoints}
+          polygons={polygons}
+          measurements={savedMeasurements}
+          search={locationsSearch}
+          onSearchChange={setLocationsSearch}
+          typeFilter={locationsTypeFilter}
+          onTypeFilterChange={setLocationsTypeFilter}
+          tagFilter={locationsTagFilter}
+          onTagFilterChange={setLocationsTagFilter}
+          allTags={allTags}
+          onFlyTo={(lngLat) => {
+            mapRef.current?.flyTo({ center: [lngLat.lng, lngLat.lat], zoom: 15, duration: 1200 })
+          }}
+          onFlyToPolygon={(geom) => {
+            const ring = geom.coordinates[0]
+            if (!ring?.length) return
+            const lngs = ring.map(c => c[0])
+            const lats = ring.map(c => c[1])
+            mapRef.current?.fitBounds(
+              [[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]],
+              { padding: 80, maxZoom: 17, duration: 1200 }
+            )
+          }}
+          onFlyToMeasurement={(m) => {
+            if (m.points.length === 0) return
+            const [lng, lat] = m.points[0]
+            mapRef.current?.flyTo({ center: [lng, lat], zoom: 14, duration: 1200 })
+          }}
+          onDeleteCheckpoint={(id) => {
+            markersRef.current.get(id)?.remove()
+            markersRef.current.delete(id)
+            setCheckpoints(prev => prev.filter(c => c.id !== id))
+          }}
+          onDeletePolygon={(id) => {
+            labelMarkersRef.current.get(id)?.remove()
+            labelMarkersRef.current.delete(id)
+            setPolygons(prev => prev.filter(p => p.id !== id))
+          }}
+          onDeleteMeasurement={(id) => setSavedMeasurements(prev => prev.filter(m => m.id !== id))}
+          onAddTag={(type, id, tag) => {
+            if (type === "checkpoint") setCheckpoints(prev => prev.map(c => c.id === id ? { ...c, tags: [...new Set([...c.tags, tag])] } : c))
+            else if (type === "polygon") setPolygons(prev => prev.map(p => p.id === id ? { ...p, tags: [...new Set([...p.tags, tag])] } : p))
+            else setSavedMeasurements(prev => prev.map(m => m.id === id ? { ...m, tags: [...new Set([...m.tags, tag])] } : m))
+          }}
+          onRemoveTag={(type, id, tag) => {
+            if (type === "checkpoint") setCheckpoints(prev => prev.map(c => c.id === id ? { ...c, tags: c.tags.filter(t => t !== tag) } : c))
+            else if (type === "polygon") setPolygons(prev => prev.map(p => p.id === id ? { ...p, tags: p.tags.filter(t => t !== tag) } : p))
+            else setSavedMeasurements(prev => prev.map(m => m.id === id ? { ...m, tags: m.tags.filter(t => t !== tag) } : m))
+          }}
+        />
       )}
 
       {/* ── Toast ───────────────────────────────────────────────────────────── */}
@@ -1621,5 +2307,475 @@ function GlobeIcon() {
       <line x1="2" y1="3.5" x2="11" y2="3.5" />
       <line x1="2" y1="9.5" x2="11" y2="9.5" />
     </svg>
+  )
+}
+
+function PlacemarkIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M6.5 1.5C4.57 1.5 3 3.07 3 5c0 2.63 3.5 6.5 3.5 6.5S10 7.63 10 5c0-1.93-1.57-3.5-3.5-3.5z"/>
+      <circle cx="6.5" cy="5" r="1.2"/>
+    </svg>
+  )
+}
+
+function MeasureIcon({ type }: { type: "distance" | "area" | "radius" }) {
+  if (type === "distance") return (
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+      <line x1="1.5" y1="6.5" x2="11.5" y2="6.5" />
+      <line x1="1.5" y1="4.5" x2="1.5" y2="8.5" />
+      <line x1="11.5" y1="4.5" x2="11.5" y2="8.5" />
+    </svg>
+  )
+  if (type === "area") return (
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="6.5,1.5 11.5,10.5 1.5,10.5" />
+    </svg>
+  )
+  return (
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+      <circle cx="6.5" cy="6.5" r="4" />
+      <line x1="6.5" y1="6.5" x2="10.5" y2="6.5" />
+    </svg>
+  )
+}
+
+function LocationsIcon({ active }: { active: boolean }) {
+  return (
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className={active ? "text-zinc-900" : "text-zinc-400"}>
+      <line x1="2" y1="4" x2="11" y2="4" />
+      <line x1="2" y1="7" x2="11" y2="7" />
+      <line x1="2" y1="10" x2="7" y2="10" />
+      <circle cx="10" cy="10" r="2" />
+    </svg>
+  )
+}
+
+// ─── CheckpointPanel component ────────────────────────────────────────────────
+
+function CheckpointPanel({ checkpoint, allTags, onClose, onUpdate, onDelete, onFlyTo }: {
+  checkpoint: Checkpoint
+  allTags: string[]
+  onClose: () => void
+  onUpdate: (c: Checkpoint) => void
+  onDelete: () => void
+  onFlyTo: () => void
+}) {
+  const [name, setName] = useState(checkpoint.label)
+  const [notes, setNotes] = useState(checkpoint.notes)
+  const [tagInput, setTagInput] = useState("")
+
+  const s = STATUSES.find(s => s.key === checkpoint.status)!
+
+  const save = (patch: Partial<Checkpoint>) => onUpdate({ ...checkpoint, ...patch })
+
+  return (
+    <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-80 overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center gap-2 px-3 py-2.5 border-b border-zinc-800">
+        <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: checkpoint.customColor ?? s.color }} />
+        <span className="text-xs font-semibold text-zinc-300 flex-1 truncate">{checkpoint.label || s.label}</span>
+        <button onClick={onFlyTo} title="Fly to" className="text-zinc-500 hover:text-sky-400 text-sm transition-colors">⌖</button>
+        <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300 text-xl leading-none ml-1">×</button>
+      </div>
+
+      <div className="p-3 flex flex-col gap-3 max-h-[70vh] overflow-y-auto">
+        {/* Name */}
+        <div>
+          <div className="text-[9px] uppercase tracking-wider text-zinc-600 mb-1">Name</div>
+          <input type="text" value={name} onChange={e => setName(e.target.value)}
+            onBlur={() => save({ label: name })}
+            onKeyDown={e => e.key === "Enter" && save({ label: name })}
+            placeholder="Unnamed"
+            className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-500" />
+        </div>
+
+        {/* Status */}
+        <div>
+          <div className="text-[9px] uppercase tracking-wider text-zinc-600 mb-1.5">Status</div>
+          <div className="grid grid-cols-2 gap-1">
+            {STATUSES.map(st => (
+              <button key={st.key}
+                onClick={() => save({ status: st.key })}
+                className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-[11px] transition-colors leading-tight"
+                style={{
+                  background: checkpoint.status === st.key ? st.color + "22" : "transparent",
+                  color: st.color,
+                  border: `1px solid ${checkpoint.status === st.key ? st.color + "60" : st.color + "25"}`
+                }}>
+                <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: st.color }} />
+                <span className="truncate">{st.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Tags */}
+        <div>
+          <div className="text-[9px] uppercase tracking-wider text-zinc-600 mb-1">Tags</div>
+          <div className="flex flex-wrap gap-1 mb-1.5">
+            {checkpoint.tags.map(t => (
+              <span key={t} className="flex items-center gap-1 text-[10px] bg-zinc-800 border border-zinc-700 text-zinc-400 px-1.5 py-0.5 rounded-full">
+                {t}
+                <button onClick={() => save({ tags: checkpoint.tags.filter(x => x !== t) })} className="text-zinc-600 hover:text-red-400 transition-colors">×</button>
+              </span>
+            ))}
+          </div>
+          <div className="flex gap-1.5">
+            <input type="text" value={tagInput} onChange={e => setTagInput(e.target.value)}
+              placeholder="Add tag…"
+              className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1 text-[11px] text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-500"
+              onKeyDown={e => {
+                if (e.key === "Enter" && tagInput.trim()) {
+                  save({ tags: [...new Set([...checkpoint.tags, tagInput.trim()])] })
+                  setTagInput("")
+                }
+              }} />
+            {tagInput.trim() && (
+              <button onClick={() => { save({ tags: [...new Set([...checkpoint.tags, tagInput.trim()])] }); setTagInput("") }}
+                className="text-[11px] bg-zinc-700 hover:bg-zinc-600 text-zinc-200 px-2 rounded-lg transition-colors">
+                +
+              </button>
+            )}
+          </div>
+          {allTags.length > 0 && (
+            <div className="flex flex-wrap gap-1 mt-1.5">
+              {allTags.filter(t => !checkpoint.tags.includes(t)).slice(0, 6).map(t => (
+                <button key={t} onClick={() => save({ tags: [...checkpoint.tags, t] })}
+                  className="text-[9px] bg-zinc-800 border border-zinc-700/50 text-zinc-500 hover:text-zinc-300 px-1.5 py-0.5 rounded-full transition-colors">
+                  + {t}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Notes */}
+        <div>
+          <div className="text-[9px] uppercase tracking-wider text-zinc-600 mb-1">Notes</div>
+          <textarea value={notes} onChange={e => setNotes(e.target.value)}
+            onBlur={() => save({ notes })}
+            placeholder="Add notes…"
+            rows={3}
+            className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-500 resize-none" />
+        </div>
+
+        {/* Meta */}
+        <div className="text-[10px] text-zinc-600 font-mono">
+          {checkpoint.lngLat.lat.toFixed(5)}, {checkpoint.lngLat.lng.toFixed(5)}<br />
+          {checkpoint.timestamp.toLocaleString()}
+        </div>
+
+        {/* Delete */}
+        <button onClick={onDelete}
+          className="w-full text-xs text-red-500 hover:text-red-400 hover:bg-red-500/10 py-1.5 rounded-lg transition-colors border border-red-500/20 hover:border-red-500/40">
+          Delete checkpoint
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function openLocationSearch(label: string, lat: number, lng: number) {
+  const parts: string[] = []
+  if (label.trim()) parts.push(`"${label.trim()}"`)
+  parts.push(`${lat.toFixed(5)},${lng.toFixed(5)}`)
+  window.open(`https://www.google.com/search?q=${encodeURIComponent(parts.join(' '))}`, '_blank', 'noopener,noreferrer')
+}
+
+// ─── LocationsPanel component ──────────────────────────────────────────────────
+
+interface LocationsPanelProps {
+  pos: { x: number; y: number }
+  onDragStart: (e: React.MouseEvent) => void
+  onClose: () => void
+  checkpoints: Checkpoint[]
+  polygons: DrawnPolygon[]
+  measurements: SavedMeasurement[]
+  search: string
+  onSearchChange: (v: string) => void
+  typeFilter: "all" | "checkpoint" | "polygon" | "measurement"
+  onTypeFilterChange: (v: "all" | "checkpoint" | "polygon" | "measurement") => void
+  tagFilter: string | null
+  onTagFilterChange: (v: string | null) => void
+  allTags: string[]
+  onFlyTo: (lngLat: { lng: number; lat: number }) => void
+  onFlyToPolygon: (geom: GeoJSON.Polygon) => void
+  onFlyToMeasurement: (m: SavedMeasurement) => void
+  onDeleteCheckpoint: (id: string) => void
+  onDeletePolygon: (id: string) => void
+  onDeleteMeasurement: (id: string) => void
+  onAddTag: (type: "checkpoint" | "polygon" | "measurement", id: string, tag: string) => void
+  onRemoveTag: (type: "checkpoint" | "polygon" | "measurement", id: string, tag: string) => void
+}
+
+function LocationsPanel({
+  pos, onDragStart, onClose,
+  checkpoints, polygons, measurements,
+  search, onSearchChange,
+  typeFilter, onTypeFilterChange,
+  tagFilter, onTagFilterChange,
+  allTags,
+  onFlyTo, onFlyToPolygon, onFlyToMeasurement,
+  onDeleteCheckpoint, onDeletePolygon, onDeleteMeasurement,
+  onAddTag, onRemoveTag,
+}: LocationsPanelProps) {
+  const [tagInputId, setTagInputId] = useState<string | null>(null)
+  const [tagInputVal, setTagInputVal] = useState("")
+
+  const q = search.toLowerCase()
+  const items: { type: "checkpoint" | "polygon" | "measurement"; id: string }[] = [
+    ...checkpoints.filter(c =>
+      (typeFilter === "all" || typeFilter === "checkpoint") &&
+      (!q || c.label.toLowerCase().includes(q) || c.tags.some(t => t.toLowerCase().includes(q))) &&
+      (!tagFilter || c.tags.includes(tagFilter))
+    ).map(c => ({ type: "checkpoint" as const, id: c.id })),
+    ...polygons.filter(p =>
+      (typeFilter === "all" || typeFilter === "polygon") &&
+      (!q || p.label.toLowerCase().includes(q) || p.tags.some(t => t.toLowerCase().includes(q))) &&
+      (!tagFilter || p.tags.includes(tagFilter))
+    ).map(p => ({ type: "polygon" as const, id: p.id })),
+    ...measurements.filter(m =>
+      (typeFilter === "all" || typeFilter === "measurement") &&
+      (!q || m.label.toLowerCase().includes(q) || m.tags.some(t => t.toLowerCase().includes(q))) &&
+      (!tagFilter || m.tags.includes(tagFilter))
+    ).map(m => ({ type: "measurement" as const, id: m.id })),
+  ]
+
+  const cpMap = Object.fromEntries(checkpoints.map(c => [c.id, c]))
+  const polyMap = Object.fromEntries(polygons.map(p => [p.id, p]))
+  const measMap = Object.fromEntries(measurements.map(m => [m.id, m]))
+
+  const STATUSES_MAP = Object.fromEntries(STATUSES.map(s => [s.key, s]))
+
+  return (
+    <div
+      className="absolute z-30 w-80 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl flex flex-col overflow-hidden"
+      style={{ left: pos.x, top: pos.y, maxHeight: "calc(100vh - 80px)" }}
+    >
+      {/* Header — draggable */}
+      <div
+        className="flex items-center gap-2 px-3 py-2.5 border-b border-zinc-800 cursor-move select-none bg-zinc-900/80 flex-shrink-0"
+        onMouseDown={onDragStart}
+      >
+        <span className="text-xs font-semibold text-zinc-300 flex-1">Saved Locations</span>
+        <span className="text-[10px] text-zinc-600">{items.length} / {checkpoints.length + polygons.length + measurements.length}</span>
+        <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300 text-xl leading-none ml-1">×</button>
+      </div>
+
+      {/* Search */}
+      <div className="px-3 pt-2.5 pb-2 border-b border-zinc-800/60 flex-shrink-0">
+        <div className="flex items-center gap-1.5 bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5">
+          <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className="text-zinc-500 flex-shrink-0">
+            <circle cx="4.5" cy="4.5" r="3.5" /><line x1="7.5" y1="7.5" x2="10" y2="10" />
+          </svg>
+          <input type="text" value={search} onChange={e => onSearchChange(e.target.value)}
+            placeholder="Filter locations…"
+            className="flex-1 bg-transparent text-xs text-zinc-200 placeholder-zinc-600 outline-none" />
+          {search && <button onClick={() => onSearchChange("")} className="text-zinc-500 hover:text-zinc-300 text-sm leading-none">×</button>}
+        </div>
+
+        {/* Type filter tabs */}
+        <div className="flex gap-1 mt-2">
+          {(["all", "checkpoint", "polygon", "measurement"] as const).map(t => (
+            <button key={t} onClick={() => onTypeFilterChange(t)}
+              className={`text-[10px] px-2 py-0.5 rounded-md font-medium transition-colors ${typeFilter === t ? "bg-zinc-700 text-zinc-100" : "text-zinc-500 hover:text-zinc-300"}`}>
+              {t === "all" ? "All" : t === "checkpoint" ? "Pins" : t === "polygon" ? "Areas" : "Measures"}
+            </button>
+          ))}
+        </div>
+
+        {/* Active tag filter */}
+        {tagFilter && (
+          <div className="flex items-center gap-1.5 mt-1.5">
+            <span className="text-[9px] text-zinc-600">Tag:</span>
+            <button onClick={() => onTagFilterChange(null)}
+              className="flex items-center gap-1 text-[10px] bg-zinc-700 text-zinc-300 px-2 py-0.5 rounded-full hover:bg-zinc-600 transition-colors">
+              {tagFilter} <span className="text-zinc-500">×</span>
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Tag chips (if any tags exist) */}
+      {allTags.length > 0 && !tagFilter && (
+        <div className="flex flex-wrap gap-1 px-3 py-2 border-b border-zinc-800/60 flex-shrink-0">
+          {allTags.map(t => (
+            <button key={t} onClick={() => onTagFilterChange(t)}
+              className="text-[9px] bg-zinc-800 border border-zinc-700/60 text-zinc-500 hover:text-zinc-300 hover:border-zinc-500 px-1.5 py-0.5 rounded-full transition-colors">
+              {t}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Item list */}
+      <div className="overflow-y-auto flex-1 p-2 flex flex-col gap-1">
+        {items.length === 0 && (
+          <div className="text-[11px] text-zinc-600 text-center py-8">No locations saved yet.</div>
+        )}
+
+        {items.map(({ type, id }) => {
+          if (type === "checkpoint") {
+            const c = cpMap[id]; if (!c) return null
+            const s = STATUSES_MAP[c.status]
+            return (
+              <LocationItem key={id}
+                color={c.customColor ?? s?.color ?? "#888"}
+                icon={<span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: c.customColor ?? s?.color ?? "#888" }} />}
+                label={c.label || s?.label || "Checkpoint"}
+                sublabel={`${c.lngLat.lat.toFixed(4)}, ${c.lngLat.lng.toFixed(4)}`}
+                tags={c.tags}
+                tagInputId={tagInputId}
+                tagInputVal={tagInputVal}
+                itemId={id}
+                onFlyTo={() => onFlyTo(c.lngLat)}
+                onSearch={() => openLocationSearch(c.label || s?.label || "", c.lngLat.lat, c.lngLat.lng)}
+                onDelete={() => onDeleteCheckpoint(id)}
+                onSetTagInput={setTagInputId}
+                onTagInputVal={setTagInputVal}
+                onAddTag={(tag) => onAddTag("checkpoint", id, tag)}
+                onRemoveTag={(tag) => onRemoveTag("checkpoint", id, tag)}
+                onTagClick={onTagFilterChange}
+              />
+            )
+          }
+          if (type === "polygon") {
+            const p = polyMap[id]; if (!p) return null
+            const s = p.status ? STATUSES_MAP[p.status] : null
+            return (
+              <LocationItem key={id}
+                color={s?.color ?? "#3bb2d0"}
+                icon={<svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke={s?.color ?? "#3bb2d0"} strokeWidth="1.5" strokeLinejoin="round"><polygon points="5.5,1 10,9 1,9" /></svg>}
+                label={p.label}
+                sublabel={`Polygon · ${p.tags.length > 0 ? "" : "no tags"}`}
+                tags={p.tags}
+                tagInputId={tagInputId}
+                tagInputVal={tagInputVal}
+                itemId={id}
+                onFlyTo={() => onFlyToPolygon(p.geometry)}
+                onSearch={() => { const [clng, clat] = computeCentroid(p.geometry); openLocationSearch(p.label, clat, clng) }}
+                onDelete={() => onDeletePolygon(id)}
+                onSetTagInput={setTagInputId}
+                onTagInputVal={setTagInputVal}
+                onAddTag={(tag) => onAddTag("polygon", id, tag)}
+                onRemoveTag={(tag) => onRemoveTag("polygon", id, tag)}
+                onTagClick={onTagFilterChange}
+              />
+            )
+          }
+          if (type === "measurement") {
+            const m = measMap[id]; if (!m) return null
+            const icon = m.type === "distance" ? "━" : m.type === "area" ? "▲" : "◎"
+            return (
+              <LocationItem key={id}
+                color="#38bdf8"
+                icon={<span className="text-sky-400 text-[11px] font-bold leading-none">{icon}</span>}
+                label={m.label}
+                sublabel={m.type === "distance" ? `${m.points.length} pts` : m.type === "radius" ? `Circle` : `${m.points.length} pts`}
+                tags={m.tags}
+                tagInputId={tagInputId}
+                tagInputVal={tagInputVal}
+                itemId={id}
+                onFlyTo={() => onFlyToMeasurement(m)}
+                onSearch={() => openLocationSearch(m.label, m.points[0][1], m.points[0][0])}
+                onDelete={() => onDeleteMeasurement(id)}
+                onSetTagInput={setTagInputId}
+                onTagInputVal={setTagInputVal}
+                onAddTag={(tag) => onAddTag("measurement", id, tag)}
+                onRemoveTag={(tag) => onRemoveTag("measurement", id, tag)}
+                onTagClick={onTagFilterChange}
+              />
+            )
+          }
+          return null
+        })}
+      </div>
+    </div>
+  )
+}
+
+interface LocationItemProps {
+  color: string
+  icon: ReactNode
+  label: string
+  sublabel: string
+  tags: string[]
+  tagInputId: string | null
+  tagInputVal: string
+  itemId: string
+  onFlyTo: () => void
+  onSearch: () => void
+  onDelete: () => void
+  onSetTagInput: (id: string | null) => void
+  onTagInputVal: (v: string) => void
+  onAddTag: (tag: string) => void
+  onRemoveTag: (tag: string) => void
+  onTagClick: (tag: string) => void
+}
+
+function LocationItem({
+  icon, label, sublabel, tags,
+  tagInputId, tagInputVal, itemId,
+  onFlyTo, onSearch, onDelete, onSetTagInput, onTagInputVal, onAddTag, onRemoveTag, onTagClick,
+}: LocationItemProps) {
+  const showTagInput = tagInputId === itemId
+
+  return (
+    <div className="group rounded-lg bg-zinc-800/50 border border-zinc-700/30 hover:border-zinc-600/60 transition-colors px-2.5 py-2 flex flex-col gap-1.5 cursor-pointer" onClick={onFlyTo}>
+      <div className="flex items-center gap-2">
+        <div className="flex-shrink-0">{icon}</div>
+        <div className="flex-1 min-w-0">
+          <div className="text-xs text-zinc-200 font-medium truncate">{label || <span className="text-zinc-500 italic">unnamed</span>}</div>
+          <div className="text-[10px] text-zinc-600 truncate">{sublabel}</div>
+        </div>
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <button onClick={(e) => { e.stopPropagation(); onSearch() }} title="Search on Google" className="w-5 h-5 flex items-center justify-center text-zinc-500 hover:text-blue-400 transition-colors opacity-0 group-hover:opacity-100">
+            <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><circle cx="4.5" cy="4.5" r="3.2"/><line x1="7" y1="7" x2="10" y2="10"/></svg>
+          </button>
+          <button onClick={(e) => { e.stopPropagation(); onDelete() }} title="Delete" className="w-5 h-5 flex items-center justify-center text-zinc-500 hover:text-red-400 transition-colors text-sm opacity-0 group-hover:opacity-100">×</button>
+        </div>
+      </div>
+
+      {/* Tags */}
+      {(tags.length > 0 || showTagInput) && (
+        <div className="flex flex-wrap gap-1 items-center" onClick={e => e.stopPropagation()}>
+          {tags.map(t => (
+            <button key={t} onClick={() => onTagClick(t)}
+              className="group/tag flex items-center gap-0.5 text-[9px] bg-zinc-700/60 border border-zinc-600/40 text-zinc-400 hover:text-zinc-200 px-1.5 py-0.5 rounded-full transition-colors">
+              {t}
+              <span onClick={(e) => { e.stopPropagation(); onRemoveTag(t) }} className="opacity-0 group-hover/tag:opacity-100 text-zinc-500 hover:text-red-400 ml-0.5 transition-opacity">×</span>
+            </button>
+          ))}
+          {showTagInput ? (
+            <input autoFocus type="text" value={tagInputVal}
+              onChange={e => onTagInputVal(e.target.value)}
+              placeholder="tag name"
+              className="text-[10px] bg-zinc-700 border border-zinc-600 rounded-full px-2 py-0.5 text-zinc-300 outline-none w-20"
+              onKeyDown={e => {
+                if (e.key === "Enter" && tagInputVal.trim()) {
+                  onAddTag(tagInputVal.trim()); onTagInputVal(""); onSetTagInput(null)
+                }
+                if (e.key === "Escape") { onTagInputVal(""); onSetTagInput(null) }
+              }}
+              onBlur={() => { if (tagInputVal.trim()) onAddTag(tagInputVal.trim()); onTagInputVal(""); onSetTagInput(null) }}
+            />
+          ) : (
+            <button onClick={() => { onSetTagInput(itemId); onTagInputVal("") }}
+              className="text-[9px] text-zinc-600 hover:text-zinc-400 px-1.5 py-0.5 rounded-full border border-zinc-700/40 hover:border-zinc-600 transition-colors">
+              + tag
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Add tag button when no tags yet */}
+      {tags.length === 0 && !showTagInput && (
+        <button onClick={(e) => { e.stopPropagation(); onSetTagInput(itemId); onTagInputVal("") }}
+          className="self-start text-[9px] text-zinc-600 hover:text-zinc-400 transition-colors">
+          + add tag
+        </button>
+      )}
+    </div>
   )
 }
